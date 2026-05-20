@@ -1,0 +1,9 @@
+node_modules
+.git
+.github
+packages/isenflow/tests
+apps/demos/tests
+playwright-report
+test-results
+*.test.ts
+*.spec.ts
