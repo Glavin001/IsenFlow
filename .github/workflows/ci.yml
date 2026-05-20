@@ -91,6 +91,20 @@ jobs:
           which chromium 2>/dev/null || true
           ls /opt/pw-browsers/ 2>/dev/null || true
           /opt/pw-browsers/chromium-*/chrome-linux/chrome --version 2>/dev/null || true
+      - name: Start Vite preview server
+        run: |
+          pnpm --filter demos preview > preview.log 2>&1 &
+          echo $! > preview.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4173 > /dev/null 2>&1; then
+              echo "preview ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::preview server did not become ready in 60s"
+          cat preview.log
+          exit 1
       - run: pnpm --filter demos test:e2e
         env:
           CI: 'true'

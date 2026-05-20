@@ -30,8 +30,13 @@ export default defineConfig({
   ],
   webServer: {
     command: 'pnpm preview',
-    port: 4173,
-    reuseExistingServer: !process.env.CI,
+    url: 'http://127.0.0.1:4173',
+    // In CI we start the preview server explicitly in the workflow and rely
+    // on `reuseExistingServer: true` to skip Playwright's spawn entirely.
+    // Locally Playwright still starts it on demand.
+    reuseExistingServer: true,
     timeout: 60_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
   },
 });
