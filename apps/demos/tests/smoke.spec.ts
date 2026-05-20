@@ -16,19 +16,32 @@ test('demo selector lists all demos', async ({ page }) => {
 });
 
 for (const id of DEMOS) {
-  test(`demo ${id} loads without fatal errors`, async ({ page }) => {
+  test(`demo ${id} loads without fatal errors`, async ({ page }, testInfo) => {
     const errors: string[] = [];
-    page.on('pageerror', (e) => errors.push(e.message));
+    const consoleLog: string[] = [];
+    page.on('pageerror', (e) => errors.push(`${e.name}: ${e.message}\n${e.stack ?? ''}`));
+    page.on('console', (msg) => consoleLog.push(`[${msg.type()}] ${msg.text()}`));
     await page.goto(`/#${id}`);
-    // Wait for canvas + scene initialization.
     await expect(page.locator('canvas')).toBeVisible({ timeout: 30_000 });
+
+    // Give the demo a beat to surface any fatal init error.
+    await page.waitForTimeout(500);
+
+    // Always attach console + pageerrors for forensics.
+    await testInfo.attach('page-console', { body: consoleLog.join('\n'), contentType: 'text/plain' });
+    if (errors.length) {
+      await testInfo.attach('page-errors', { body: errors.join('\n\n'), contentType: 'text/plain' });
+    }
+
     // Tolerate WebGPU-unavailable banner (CI may not have a working device).
     const err = page.locator('#err');
     if (await err.isVisible().catch(() => false)) {
       const text = (await err.textContent()) ?? '';
-      // Acceptable: WebGPU not available.
-      expect(text.toLowerCase()).toContain('webgpu');
-      test.skip(true, `WebGPU unavailable in this runner: ${text.slice(0, 200)}`);
+      const lower = text.toLowerCase();
+      if (lower.includes('webgpu') || lower.includes('adapter') || lower.includes('gpu')) {
+        test.skip(true, `WebGPU unavailable: ${text.slice(0, 200)}`);
+      }
+      throw new Error(`Demo fatal error: ${text.slice(0, 400)}`);
     }
     // No uncaught JS errors.
     expect(errors, errors.join('\n')).toHaveLength(0);

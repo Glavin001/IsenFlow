@@ -1,11 +1,13 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('SWE solver — real WebGPU compute', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    page.on('console', (msg) => testInfo.attach('console', { body: `[${msg.type()}] ${msg.text()}`, contentType: 'text/plain' }).catch(() => {}));
     await page.goto('/test-harness.html');
     await page.waitForFunction(() => window.__isenflow_test?.ready === true, { timeout: 60_000 });
-    const hasGPU = await page.evaluate(() => window.__isenflow_test.hasWebGPU());
-    test.skip(!hasGPU, 'WebGPU not available in this runner');
+    const probe = await page.evaluate(() => window.__isenflow_test.probeAdapter());
+    console.log('[gpu-probe]', JSON.stringify(probe));
+    test.skip(!probe.available, `WebGPU adapter unavailable: ${probe.reason ?? 'unknown'}`);
   });
 
   test('lake-at-rest: total volume drifts < 1% over 300 steps', async ({ page }) => {

@@ -86,12 +86,23 @@ jobs:
       - run: pnpm --filter demos build
       - run: pnpm exec playwright install --with-deps chromium
         working-directory: apps/demos
+      - name: Print Chromium + WebGPU diagnostics
+        run: |
+          which chromium 2>/dev/null || true
+          ls /opt/pw-browsers/ 2>/dev/null || true
+          /opt/pw-browsers/chromium-*/chrome-linux/chrome --version 2>/dev/null || true
       - run: pnpm --filter demos test:e2e
         env:
           CI: 'true'
-      - if: failure()
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
           path: apps/demos/playwright-report
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: apps/demos/test-results
           if-no-files-found: ignore

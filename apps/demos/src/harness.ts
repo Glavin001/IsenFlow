@@ -67,6 +67,25 @@ async function runDamBreak(
   return { frontCellAtEnd: frontCell, expectedCell };
 }
 
+async function probeAdapter(): Promise<{ available: boolean; reason?: string; adapter?: string }> {
+  if (!isWebGPUAvailable()) return { available: false, reason: 'navigator.gpu missing' };
+  try {
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) return { available: false, reason: 'requestAdapter returned null' };
+    let info = '';
+    try {
+      const i = (adapter as GPUAdapter & { info?: { vendor?: string; architecture?: string; device?: string } }).info;
+      if (i) info = `${i.vendor ?? '?'} / ${i.architecture ?? '?'} / ${i.device ?? '?'}`;
+    } catch { /* ignore */ }
+    const device = await adapter.requestDevice().catch(() => null);
+    if (!device) return { available: false, reason: 'requestDevice returned null', adapter: info };
+    device.destroy?.();
+    return { available: true, adapter: info };
+  } catch (err) {
+    return { available: false, reason: (err as Error).message };
+  }
+}
+
 declare global {
   interface Window {
     __isenflow_test: {
@@ -74,6 +93,7 @@ declare global {
       runConservation: typeof runConservation;
       runDamBreak: typeof runDamBreak;
       hasWebGPU: () => boolean;
+      probeAdapter: typeof probeAdapter;
     };
   }
 }
@@ -83,8 +103,10 @@ window.__isenflow_test = {
   runConservation,
   runDamBreak,
   hasWebGPU: isWebGPUAvailable,
+  probeAdapter,
 };
 
-log(`WebGPU available: ${isWebGPUAvailable()}`);
+log(`WebGPU feature flag: ${isWebGPUAvailable()}`);
+probeAdapter().then((p) => log(`adapter probe: ${JSON.stringify(p)}`)).catch(() => {});
 window.__isenflow_test.ready = true;
 log('harness ready');
