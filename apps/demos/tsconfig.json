@@ -2,7 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "jsx": "preserve"
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "isenflow": ["../../packages/isenflow/src/index.ts"],
+      "isenflow/math": ["../../packages/isenflow/src/math.ts"]
+    }
   },
   "include": ["src/**/*", "tests/**/*", "vite.config.ts", "playwright.config.ts"]
 }
