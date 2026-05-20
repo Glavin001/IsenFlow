@@ -11,13 +11,8 @@ const demo: Demo = {
   setup(ctx) {
     const g = ctx.solver.grid;
     // Pre-fill the channel uniformly with shallow water.
-    const data = new Float32Array(g.width * g.height * 2);
-    for (let i = 0; i < g.width * g.height; i++) { data[i * 2] = 0.6; data[i * 2 + 1] = 0.6; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex }, data,
-      { bytesPerRow: g.width * 8, rowsPerImage: g.height },
-      { width: g.width, height: g.height, depthOrArrayLayers: 1 },
-    );
+    const initWater = new Float32Array(g.width * g.height).fill(0.6);
+    ctx.solver.writeWaterFull(initWater);
 
     // Banks: raise bed at top/bottom rows.
     const bank = new Float32Array(g.width).fill(2);
@@ -46,16 +41,7 @@ const demo: Demo = {
     // Re-inject inflow each frame at west edge.
     const g = ctx.solver.grid;
     const inflow = new Float32Array(g.height).fill(1.2);
-    ctx.solver.writeBedRegion({ x: 0, y: 0, w: 1, h: g.height }, new Float32Array(g.height));
-    // Use the water texture write directly to set depth at column 0.
-    const data = new Float32Array(g.height * 2);
-    for (let j = 0; j < g.height; j++) { data[j * 2] = inflow[j]!; data[j * 2 + 1] = inflow[j]!; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex, origin: { x: 0, y: 0 } },
-      data,
-      { bytesPerRow: 8, rowsPerImage: g.height },
-      { width: 1, height: g.height, depthOrArrayLayers: 1 },
-    );
+    ctx.solver.writeWaterRegion({ x: 0, y: 0, w: 1, h: g.height }, inflow);
     // Push the crate manually with a small constant force (simulating drag).
     const body = ctx.scratch.body as ReturnType<typeof ctx.world.createRigidBody>;
     body.addForce({ x: 1500, y: 0, z: 0 }, true);

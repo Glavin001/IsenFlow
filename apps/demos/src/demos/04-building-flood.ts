@@ -60,14 +60,8 @@ const demo: Demo = {
     // Rising-tide source at the south edge (j = max).
     const g = ctx.solver.grid;
     const tideH = Math.min(2.5, 0.2 * (ctx.scratch.t as number));
-    const data = new Float32Array(g.width * 2);
-    for (let i = 0; i < g.width; i++) { data[i * 2] = tideH; data[i * 2 + 1] = tideH; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex, origin: { x: 0, y: g.height - 1 } },
-      data,
-      { bytesPerRow: g.width * 8, rowsPerImage: 1 },
-      { width: g.width, height: 1, depthOrArrayLayers: 1 },
-    );
+    const tideRow = new Float32Array(g.width).fill(tideH);
+    ctx.solver.writeWaterRegion({ x: 0, y: g.height - 1, w: g.width, h: 1 }, tideRow);
   },
 };
 

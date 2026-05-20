@@ -19,16 +19,7 @@ const demo: Demo = {
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < fillEnd; i++) init[j * w + i] = 4;
     }
-    // Seed the water texture directly via writeWaterCell ×N — costly but simple.
-    // Faster: encode in one writeTexture call:
-    const data = new Float32Array(w * h * 2);
-    for (let i = 0; i < init.length; i++) { data[i * 2] = init[i]!; data[i * 2 + 1] = init[i]!; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex },
-      data,
-      { bytesPerRow: w * 8, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
+    ctx.solver.writeWaterFull(init);
     // Build the dam by raising the bed to 6 m for one column near fillEnd.
     const dam = new Float32Array(h).fill(6);
     ctx.solver.writeBedRegion({ x: fillEnd, y: 0, w: 1, h }, dam);

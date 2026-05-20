@@ -1,19 +1,12 @@
 // Spec §10: body→water volume-conserving displacement.
-//
-// Each cell whose bed rose since last frame ejects the delta volume to its
-// 8 neighbors. Splash impulse modulates velocity at the same time.
 
 @group(0) @binding(0) var<uniform> params: SimParams;
-@group(0) @binding(1) var bedTex:        texture_storage_2d<rg32float, read_write>;
-@group(0) @binding(2) var waterTex:      texture_storage_2d<rg32float, read_write>;
-@group(0) @binding(3) var prevBedTex:    texture_storage_2d<r32float,  read>;
-@group(0) @binding(4) var<storage, read_write> hDelta: array<atomic<i32>>;
+@group(0) @binding(1) var<storage, read_write> bed:        array<f32>;       // 2 floats per cell
+@group(0) @binding(2) var<storage, read_write> water:      array<f32>;       // 2 floats per cell
+@group(0) @binding(3) var<storage, read>       prevBed:    array<f32>;       // 1 float per cell
+@group(0) @binding(4) var<storage, read_write> hDelta:     array<atomic<i32>>;
 
 const SCALE: f32 = 10000.0;
-
-fn idx(p: vec2<i32>, w: i32) -> u32 {
-  return u32(p.y * w + p.x);
-}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -21,18 +14,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let h = i32(params.height);
   let p = vec2<i32>(i32(gid.x), i32(gid.y));
   if (!in_bounds(p, w, h)) { return; }
+  let idx = cell_idx(p.x, p.y, w);
 
-  let bed_now = textureLoad(bedTex, p).y;
-  let bed_prev = textureLoad(prevBedTex, p).x;
-  let delta_bed = bed_now - bed_prev;        // positive = bed rose, body intruded
-
+  let bed_now  = bed[idx * 2u + 1u];
+  let bed_prev = prevBed[idx];
+  let delta_bed = bed_now - bed_prev;
   if (delta_bed <= 0.0) { return; }
 
-  let h_self = textureLoad(waterTex, p).x;
+  let h_self = water[idx * 2u];
   let delta = min(delta_bed, 0.5 * h_self);
   if (delta <= 0.0) { return; }
 
-  // 8-neighbor Gaussian-ish kernel, normalized.
   let weights = array<f32, 9>(
     0.0625, 0.125, 0.0625,
     0.125,  0.0,   0.125,
@@ -46,9 +38,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let wi = (dy + 1) * 3 + (dx + 1);
       let wt = weights[wi];
       let add = delta * wt;
-      atomicAdd(&hDelta[idx(np, w)], i32(add * SCALE));
+      atomicAdd(&hDelta[cell_idx(np.x, np.y, w)], i32(add * SCALE));
     }
   }
-  // Pull water out of source cell.
-  atomicAdd(&hDelta[idx(p, w)], i32(-delta * SCALE));
+  atomicAdd(&hDelta[idx], i32(-delta * SCALE));
 }

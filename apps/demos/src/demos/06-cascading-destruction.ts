@@ -42,14 +42,7 @@ const demo: Demo = {
     ctx.scratch.t = (ctx.scratch.t as number) + dt;
     // Constant inflow at west edge.
     const tide = Math.min(3.5, 0.4 * (ctx.scratch.t as number));
-    const data = new Float32Array(g.height * 2);
-    for (let j = 0; j < g.height; j++) { data[j * 2] = tide; data[j * 2 + 1] = tide; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex, origin: { x: 0, y: 0 } },
-      data,
-      { bytesPerRow: 8, rowsPerImage: g.height },
-      { width: 1, height: g.height, depthOrArrayLayers: 1 },
-    );
+    ctx.solver.writeWaterRegion({ x: 0, y: 0, w: 1, h: g.height }, new Float32Array(g.height).fill(tide));
     // For each surviving chunk, approximate hydrostatic load = ½ρgh²·L using tide-derived h.
     const chunks = ctx.scratch.chunks as ChunkEntry[];
     for (const c of chunks) {

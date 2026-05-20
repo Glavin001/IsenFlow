@@ -11,13 +11,7 @@ const demo: Demo = {
   setup(ctx) {
     const g = ctx.solver.grid;
     // Deep pond: 3m water everywhere.
-    const data = new Float32Array(g.width * g.height * 2);
-    for (let i = 0; i < g.width * g.height; i++) { data[i * 2] = 3; data[i * 2 + 1] = 3; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex }, data,
-      { bytesPerRow: g.width * 8, rowsPerImage: g.height },
-      { width: g.width, height: g.height, depthOrArrayLayers: 1 },
-    );
+    ctx.solver.writeWaterFull(new Float32Array(g.width * g.height).fill(3));
     // Bridge.
     const bridge = ownByDemo(new THREE.Mesh(
       new THREE.BoxGeometry(40, 0.6, 6),

@@ -1,21 +1,33 @@
 /**
- * Virtual-pipes Shallow Water Equations solver, WebGPU compute pipeline owner.
+ * Virtual-pipes Shallow Water Equations solver.
  *
- * Owns all storage textures and atomic buffers, exposes a per-frame `step()`
- * that runs N substeps, plus accessors for reading water/bed back to CPU.
+ * All cell-indexed state lives in storage buffers, not textures — that side-steps
+ * the WebGPU restriction that `rg32float` storage textures can only be opened
+ * with the `chromium-experimental-read-write-storage-texture` feature, and also
+ * avoids the per-stage storage-texture cap (4 per stage on most adapters).
  *
- * The compute kernels are in src/core/shaders/*.wgsl. This file wires them
- * together with bind-group layouts and dispatch sizes.
+ * Buffer layout (one buffer per logical field, row-major idx = j*width + i):
+ *   bed      : 2 f32 per cell  (terrain, total)
+ *   water    : 2 f32 per cell  (h, h_prev)
+ *   fluxLR   : 2 f32 per cell  (left, right)
+ *   fluxUD   : 2 f32 per cell  (down, up)
+ *   velocity : 2 f32 per cell  (u, v)
+ *   chunkId  : 1 u32 per cell
+ *   chunkVel : 4 f32 per cell  (vx, vy, vz, speed)
+ *   boundary : 1 u32 per cell
+ *   prevBed  : 1 f32 per cell
+ *   hDelta   : 1 i32 per cell  (atomic, fixed-point)
+ *   forceAccum: 6 i32 per chunk (fx, fy, fz, tx, ty, tz; atomic, fixed-point)
  */
 import type { GPUContext } from './GPUContext.js';
 import type { SimulationGrid } from './SimulationGrid.js';
 import { ShaderSource } from './shaders/index.js';
 
 export interface SolverOptions {
-  readonly dt: number;             // simulation timestep (s)
+  readonly dt: number;
   readonly substepsPerFrame: number;
   readonly gravity?: number;
-  readonly damping?: number;       // pipe damping ∈ (0, 1]
+  readonly damping?: number;
   readonly maxChunks?: number;
 }
 
@@ -25,83 +37,53 @@ const DEFAULT_OPTS: Required<Omit<SolverOptions, 'dt' | 'substepsPerFrame'>> = {
   maxChunks: 256,
 };
 
+const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+
 export class VirtualPipesSolver {
   readonly ctx: GPUContext;
   readonly grid: SimulationGrid;
   readonly opts: SolverOptions & typeof DEFAULT_OPTS;
 
-  // Storage textures
-  readonly bedTex: GPUTexture;
-  readonly waterTex: GPUTexture;
-  readonly fluxLR: GPUTexture;
-  readonly fluxUD: GPUTexture;
-  readonly velocity: GPUTexture;
-  readonly chunkId: GPUTexture;
-  readonly chunkVel: GPUTexture;
-  readonly boundary: GPUTexture;
-  readonly prevBed: GPUTexture;
-
-  // Atomic storage buffers
-  readonly forceAccum: GPUBuffer;
-  readonly torqueAccum: GPUBuffer;
+  readonly bed: GPUBuffer;
+  readonly water: GPUBuffer;
+  readonly fluxLR: GPUBuffer;
+  readonly fluxUD: GPUBuffer;
+  readonly velocity: GPUBuffer;
+  readonly chunkId: GPUBuffer;
+  readonly chunkVel: GPUBuffer;
+  readonly boundary: GPUBuffer;
+  readonly prevBed: GPUBuffer;
   readonly hDelta: GPUBuffer;
+  readonly forceAccum: GPUBuffer;
   readonly chunkCOMs: GPUBuffer;
 
-  // Uniforms
   readonly params: GPUBuffer;
   private paramsCpu: ArrayBuffer;
   private paramsView: DataView;
 
-  // Pipelines
   private pipelines: Record<string, GPUComputePipeline> = {};
-
-  // Force readback ring
-  private readonly readbackBuffers: GPUBuffer[] = [];
-  private readonly readbackInFlight: boolean[] = [];
 
   constructor(ctx: GPUContext, grid: SimulationGrid, opts: SolverOptions) {
     this.ctx = ctx;
     this.grid = grid;
     this.opts = { ...DEFAULT_OPTS, ...opts };
-
-    const w = grid.width;
-    const h = grid.height;
     const dev = ctx.device;
+    const cells = grid.width * grid.height;
 
-    const usage =
-      GPUTextureUsage.STORAGE_BINDING |
-      GPUTextureUsage.COPY_SRC |
-      GPUTextureUsage.COPY_DST |
-      GPUTextureUsage.TEXTURE_BINDING;
+    this.bed       = dev.createBuffer({ size: cells * 2 * 4, usage: STORAGE_USAGE, label: 'isenflow.bed' });
+    this.water     = dev.createBuffer({ size: cells * 2 * 4, usage: STORAGE_USAGE, label: 'isenflow.water' });
+    this.fluxLR    = dev.createBuffer({ size: cells * 2 * 4, usage: STORAGE_USAGE, label: 'isenflow.fluxLR' });
+    this.fluxUD    = dev.createBuffer({ size: cells * 2 * 4, usage: STORAGE_USAGE, label: 'isenflow.fluxUD' });
+    this.velocity  = dev.createBuffer({ size: cells * 2 * 4, usage: STORAGE_USAGE, label: 'isenflow.velocity' });
+    this.chunkId   = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.chunkId' });
+    this.chunkVel  = dev.createBuffer({ size: cells * 4 * 4, usage: STORAGE_USAGE, label: 'isenflow.chunkVel' });
+    this.boundary  = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.boundary' });
+    this.prevBed   = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.prevBed' });
+    this.hDelta    = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.hDelta' });
 
-    this.bedTex = dev.createTexture({ size: [w, h], format: 'rg32float', usage, label: 'isenflow.bed' });
-    this.waterTex = dev.createTexture({ size: [w, h], format: 'rg32float', usage, label: 'isenflow.water' });
-    this.fluxLR = dev.createTexture({ size: [w, h], format: 'rg32float', usage, label: 'isenflow.fluxLR' });
-    this.fluxUD = dev.createTexture({ size: [w, h], format: 'rg32float', usage, label: 'isenflow.fluxUD' });
-    this.velocity = dev.createTexture({ size: [w, h], format: 'rg32float', usage, label: 'isenflow.velocity' });
-    this.chunkId = dev.createTexture({ size: [w, h], format: 'r32uint', usage, label: 'isenflow.chunkId' });
-    this.chunkVel = dev.createTexture({ size: [w, h], format: 'rgba32float', usage, label: 'isenflow.chunkVel' });
-    this.boundary = dev.createTexture({ size: [w, h], format: 'r32uint', usage, label: 'isenflow.boundary' });
-    this.prevBed = dev.createTexture({ size: [w, h], format: 'r32float', usage, label: 'isenflow.prevBed' });
-
-    // Buffers
-    const chunkBytes = this.opts.maxChunks * 3 * 4;
-    this.forceAccum = dev.createBuffer({
-      size: chunkBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-      label: 'isenflow.forceAccum',
-    });
-    this.torqueAccum = dev.createBuffer({
-      size: chunkBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-      label: 'isenflow.torqueAccum',
-    });
-    this.hDelta = dev.createBuffer({
-      size: w * h * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      label: 'isenflow.hDelta',
-    });
-    this.chunkCOMs = dev.createBuffer({
+    const chunkBytes = this.opts.maxChunks * 6 * 4;
+    this.forceAccum = dev.createBuffer({ size: chunkBytes, usage: STORAGE_USAGE, label: 'isenflow.forceAccum' });
+    this.chunkCOMs  = dev.createBuffer({
       size: this.opts.maxChunks * 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       label: 'isenflow.chunkCOMs',
@@ -115,20 +97,7 @@ export class VirtualPipesSolver {
       label: 'isenflow.params',
     });
     this.uploadParams();
-
-    // Readback ring (3 buffers).
-    for (let i = 0; i < 3; i++) {
-      this.readbackBuffers.push(
-        dev.createBuffer({
-          size: chunkBytes * 2, // force + torque
-          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-          label: `isenflow.readback[${i}]`,
-        }),
-      );
-      this.readbackInFlight.push(false);
-    }
-
-    this.seedBed();
+    this.seedInitial();
     this.buildPipelines();
   }
 
@@ -145,35 +114,29 @@ export class VirtualPipesSolver {
     this.ctx.queue.writeBuffer(this.params, 0, this.paramsCpu);
   }
 
-  private seedBed(): void {
-    const w = this.grid.width;
-    const h = this.grid.height;
-    const buf = new Float32Array(w * h * 2);
-    for (let i = 0; i < w * h; i++) {
+  private seedInitial(): void {
+    const cells = this.grid.cells;
+    // Bed: terrain channel from seed, total = terrain
+    const bedData = new Float32Array(cells * 2);
+    for (let i = 0; i < cells; i++) {
       const b = this.grid.bedSeed[i] ?? 0;
-      buf[i * 2] = b;
-      buf[i * 2 + 1] = b;
+      bedData[i * 2] = b;
+      bedData[i * 2 + 1] = b;
     }
-    this.ctx.queue.writeTexture(
-      { texture: this.bedTex },
-      buf,
-      { bytesPerRow: w * 8, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
-    // initialize water
+    this.ctx.queue.writeBuffer(this.bed, 0, bedData);
+
     if (this.grid.initialDepth > 0) {
-      const wb = new Float32Array(w * h * 2);
-      for (let i = 0; i < w * h; i++) {
-        wb[i * 2] = this.grid.initialDepth;
-        wb[i * 2 + 1] = this.grid.initialDepth;
+      const water = new Float32Array(cells * 2);
+      for (let i = 0; i < cells; i++) {
+        water[i * 2] = this.grid.initialDepth;
+        water[i * 2 + 1] = this.grid.initialDepth;
       }
-      this.ctx.queue.writeTexture(
-        { texture: this.waterTex },
-        wb,
-        { bytesPerRow: w * 8, rowsPerImage: h },
-        { width: w, height: h, depthOrArrayLayers: 1 },
-      );
+      this.ctx.queue.writeBuffer(this.water, 0, water);
     }
+    // prevBed = current total bed
+    const prev = new Float32Array(cells);
+    for (let i = 0; i < cells; i++) prev[i] = bedData[i * 2 + 1]!;
+    this.ctx.queue.writeBuffer(this.prevBed, 0, prev);
   }
 
   private buildPipelines(): void {
@@ -193,86 +156,62 @@ export class VirtualPipesSolver {
     this.pipelines.zeroForces = make('zeroForces', ShaderSource.zeroForces);
   }
 
-  /** Run one render-frame step (N substeps internally). */
   step(): void {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.step' });
-    const w = this.grid.width;
-    const h = this.grid.height;
-    const dx = Math.ceil(w / 8);
-    const dy = Math.ceil(h / 8);
-    const dispatchTiled = (pass: GPUComputePassEncoder) => pass.dispatchWorkgroups(dx, dy, 1);
+    const dx = Math.ceil(this.grid.width / 8);
+    const dy = Math.ceil(this.grid.height / 8);
 
     for (let s = 0; s < this.opts.substepsPerFrame; s++) {
-      // 1. fluxes
-      {
-        const pipeline = this.pipelines.fluxes;
-        const pass = encoder.beginComputePass({ label: 'fluxes' });
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.bindFluxes(pipeline));
-        dispatchTiled(pass);
-        pass.end();
-      }
-      // 2. update water + velocity
-      {
-        const pipeline = this.pipelines.update;
-        const pass = encoder.beginComputePass({ label: 'update' });
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.bindUpdate(pipeline));
-        dispatchTiled(pass);
-        pass.end();
-      }
-    }
+      const passF = encoder.beginComputePass({ label: 'fluxes' });
+      passF.setPipeline(this.pipelines.fluxes!);
+      passF.setBindGroup(0, this.bindFluxes(this.pipelines.fluxes!));
+      passF.dispatchWorkgroups(dx, dy, 1);
+      passF.end();
 
+      const passU = encoder.beginComputePass({ label: 'update' });
+      passU.setPipeline(this.pipelines.update!);
+      passU.setBindGroup(0, this.bindUpdate(this.pipelines.update!));
+      passU.dispatchWorkgroups(dx, dy, 1);
+      passU.end();
+    }
     this.ctx.queue.submit([encoder.finish()]);
   }
 
-  /** Run the body→water displacement pass (call after rasterizing dynamic bodies). */
   applyDisplacement(): void {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.displace' });
-    const w = this.grid.width;
-    const h = this.grid.height;
-    const dx = Math.ceil(w / 8);
-    const dy = Math.ceil(h / 8);
+    const dx = Math.ceil(this.grid.width / 8);
+    const dy = Math.ceil(this.grid.height / 8);
 
-    {
-      const pipeline = this.pipelines.displace;
-      const pass = encoder.beginComputePass({ label: 'displace' });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.bindDisplace(pipeline));
-      pass.dispatchWorkgroups(dx, dy, 1);
-      pass.end();
-    }
-    {
-      const pipeline = this.pipelines.foldDelta;
-      const pass = encoder.beginComputePass({ label: 'foldDelta' });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.bindFoldDelta(pipeline));
-      pass.dispatchWorkgroups(dx, dy, 1);
-      pass.end();
-    }
-    {
-      const pipeline = this.pipelines.snapshot;
-      const pass = encoder.beginComputePass({ label: 'snapshot' });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.bindSnapshot(pipeline));
-      pass.dispatchWorkgroups(dx, dy, 1);
-      pass.end();
-    }
+    const passD = encoder.beginComputePass({ label: 'displace' });
+    passD.setPipeline(this.pipelines.displace!);
+    passD.setBindGroup(0, this.bindDisplace(this.pipelines.displace!));
+    passD.dispatchWorkgroups(dx, dy, 1);
+    passD.end();
 
+    const passF = encoder.beginComputePass({ label: 'foldDelta' });
+    passF.setPipeline(this.pipelines.foldDelta!);
+    passF.setBindGroup(0, this.bindFoldDelta(this.pipelines.foldDelta!));
+    passF.dispatchWorkgroups(dx, dy, 1);
+    passF.end();
+
+    const passS = encoder.beginComputePass({ label: 'snapshot' });
+    passS.setPipeline(this.pipelines.snapshot!);
+    passS.setBindGroup(0, this.bindSnapshot(this.pipelines.snapshot!));
+    passS.dispatchWorkgroups(dx, dy, 1);
+    passS.end();
     this.ctx.queue.submit([encoder.finish()]);
   }
 
-  // --- bind helpers ------------------------------------------------------
   private bindFluxes(pipeline: GPUComputePipeline): GPUBindGroup {
     return this.ctx.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: this.bedTex.createView() },
-        { binding: 2, resource: this.waterTex.createView() },
-        { binding: 3, resource: this.fluxLR.createView() },
-        { binding: 4, resource: this.fluxUD.createView() },
-        { binding: 5, resource: this.boundary.createView() },
+        { binding: 1, resource: { buffer: this.bed } },
+        { binding: 2, resource: { buffer: this.water } },
+        { binding: 3, resource: { buffer: this.fluxLR } },
+        { binding: 4, resource: { buffer: this.fluxUD } },
+        { binding: 5, resource: { buffer: this.boundary } },
       ],
     });
   }
@@ -282,11 +221,11 @@ export class VirtualPipesSolver {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: this.waterTex.createView() },
-        { binding: 2, resource: this.fluxLR.createView() },
-        { binding: 3, resource: this.fluxUD.createView() },
-        { binding: 4, resource: this.velocity.createView() },
-        { binding: 5, resource: this.boundary.createView() },
+        { binding: 1, resource: { buffer: this.water } },
+        { binding: 2, resource: { buffer: this.fluxLR } },
+        { binding: 3, resource: { buffer: this.fluxUD } },
+        { binding: 4, resource: { buffer: this.velocity } },
+        { binding: 5, resource: { buffer: this.boundary } },
       ],
     });
   }
@@ -296,9 +235,9 @@ export class VirtualPipesSolver {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: this.bedTex.createView() },
-        { binding: 2, resource: this.waterTex.createView() },
-        { binding: 3, resource: this.prevBed.createView() },
+        { binding: 1, resource: { buffer: this.bed } },
+        { binding: 2, resource: { buffer: this.water } },
+        { binding: 3, resource: { buffer: this.prevBed } },
         { binding: 4, resource: { buffer: this.hDelta } },
       ],
     });
@@ -309,7 +248,7 @@ export class VirtualPipesSolver {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: this.waterTex.createView() },
+        { binding: 1, resource: { buffer: this.water } },
         { binding: 2, resource: { buffer: this.hDelta } },
       ],
     });
@@ -320,99 +259,113 @@ export class VirtualPipesSolver {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: this.bedTex.createView() },
-        { binding: 2, resource: this.prevBed.createView() },
+        { binding: 1, resource: { buffer: this.bed } },
+        { binding: 2, resource: { buffer: this.prevBed } },
       ],
     });
   }
 
-  // --- public helpers ----------------------------------------------------
+  // ---------- write helpers (called by demos / heightfield rasterizer) ----------
 
   /**
-   * Overwrite the dynamic bed (channel .y of bedTex) for the given region.
-   * `region` is in cell coordinates. `values` length = region cells, in row-major.
+   * Set the full bed buffer from a CPU array of length width*height with
+   * single-channel elevations. Both .x (terrain) and .y (total) are set.
+   */
+  writeBedFull(values: Float32Array): void {
+    if (values.length !== this.grid.cells) {
+      throw new Error(`writeBedFull: expected ${this.grid.cells} values, got ${values.length}`);
+    }
+    const packed = new Float32Array(this.grid.cells * 2);
+    for (let i = 0; i < values.length; i++) {
+      packed[i * 2] = values[i]!;
+      packed[i * 2 + 1] = values[i]!;
+    }
+    this.ctx.queue.writeBuffer(this.bed, 0, packed);
+  }
+
+  /**
+   * Stamp `values` (row-major, length region.w*region.h, single channel) into
+   * the bed buffer. Both terrain and total channels are overwritten.
    */
   writeBedRegion(region: { x: number; y: number; w: number; h: number }, values: Float32Array): void {
     if (values.length !== region.w * region.h) {
       throw new Error('writeBedRegion: values length mismatch');
     }
-    const packed = new Float32Array(values.length * 2);
+    // Use a per-row writeBuffer for safety (avoids a full grid-sized round-trip).
+    const W = this.grid.width;
+    for (let row = 0; row < region.h; row++) {
+      const rowOffsetCells = (region.y + row) * W + region.x;
+      const rowBytes = region.w * 2 * 4;
+      const packed = new Float32Array(region.w * 2);
+      for (let i = 0; i < region.w; i++) {
+        const v = values[row * region.w + i]!;
+        packed[i * 2] = v;
+        packed[i * 2 + 1] = v;
+      }
+      this.ctx.queue.writeBuffer(this.bed, rowOffsetCells * 2 * 4, packed.buffer, packed.byteOffset, rowBytes);
+    }
+  }
+
+  writeWaterFull(values: Float32Array): void {
+    if (values.length !== this.grid.cells) {
+      throw new Error(`writeWaterFull: expected ${this.grid.cells} values, got ${values.length}`);
+    }
+    const packed = new Float32Array(this.grid.cells * 2);
     for (let i = 0; i < values.length; i++) {
-      // keep terrain (.x) unchanged via partial write; we will overwrite both channels.
       packed[i * 2] = values[i]!;
       packed[i * 2 + 1] = values[i]!;
     }
-    this.ctx.queue.writeTexture(
-      { texture: this.bedTex, origin: { x: region.x, y: region.y } },
-      packed,
-      { bytesPerRow: region.w * 8, rowsPerImage: region.h },
-      { width: region.w, height: region.h, depthOrArrayLayers: 1 },
-    );
+    this.ctx.queue.writeBuffer(this.water, 0, packed);
   }
 
-  /** Overwrite the water depth for a single cell. */
+  writeWaterRegion(region: { x: number; y: number; w: number; h: number }, values: Float32Array): void {
+    if (values.length !== region.w * region.h) {
+      throw new Error('writeWaterRegion: values length mismatch');
+    }
+    const W = this.grid.width;
+    for (let row = 0; row < region.h; row++) {
+      const rowOffsetCells = (region.y + row) * W + region.x;
+      const rowBytes = region.w * 2 * 4;
+      const packed = new Float32Array(region.w * 2);
+      for (let i = 0; i < region.w; i++) {
+        const v = values[row * region.w + i]!;
+        packed[i * 2] = v;
+        packed[i * 2 + 1] = v;
+      }
+      this.ctx.queue.writeBuffer(this.water, rowOffsetCells * 2 * 4, packed.buffer, packed.byteOffset, rowBytes);
+    }
+  }
+
   writeWaterCell(i: number, j: number, depth: number): void {
     const data = new Float32Array([depth, depth]);
-    this.ctx.queue.writeTexture(
-      { texture: this.waterTex, origin: { x: i, y: j } },
-      data,
-      { bytesPerRow: 8, rowsPerImage: 1 },
-      { width: 1, height: 1, depthOrArrayLayers: 1 },
-    );
+    const offset = (j * this.grid.width + i) * 2 * 4;
+    this.ctx.queue.writeBuffer(this.water, offset, data);
   }
 
-  /**
-   * Asynchronously read the current water-depth texture into a Float32Array.
-   * Returns [r,g] interleaved (h, h_prev). Length = w * h * 2.
-   */
-  async readWater(): Promise<Float32Array> {
-    return this.readRG32Texture(this.waterTex);
-  }
+  // ---------- readback helpers ----------
 
-  /** Same for bed (terrain, total). */
-  async readBed(): Promise<Float32Array> {
-    return this.readRG32Texture(this.bedTex);
-  }
-
-  /** Same for velocity (u, v). */
-  async readVelocity(): Promise<Float32Array> {
-    return this.readRG32Texture(this.velocity);
-  }
-
-  private async readRG32Texture(tex: GPUTexture): Promise<Float32Array> {
-    const w = this.grid.width;
-    const h = this.grid.height;
-    // bytesPerRow must be a multiple of 256.
-    const bytesPerRowAligned = Math.ceil((w * 8) / 256) * 256;
-    const size = bytesPerRowAligned * h;
-    const buf = this.ctx.device.createBuffer({
-      size,
+  private async readF32Buffer(buf: GPUBuffer): Promise<Float32Array> {
+    const dst = this.ctx.device.createBuffer({
+      size: buf.size,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const enc = this.ctx.device.createCommandEncoder();
-    enc.copyTextureToBuffer(
-      { texture: tex },
-      { buffer: buf, bytesPerRow: bytesPerRowAligned, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
+    enc.copyBufferToBuffer(buf, 0, dst, 0, buf.size);
     this.ctx.queue.submit([enc.finish()]);
-    await buf.mapAsync(GPUMapMode.READ);
-    const raw = new Float32Array(buf.getMappedRange().slice(0));
-    buf.unmap();
-    buf.destroy();
-    // Unpack: aligned rows -> contiguous w*h*2.
-    const floatsPerRow = bytesPerRowAligned / 4;
-    const out = new Float32Array(w * h * 2);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        out[(y * w + x) * 2 + 0] = raw[y * floatsPerRow + x * 2 + 0]!;
-        out[(y * w + x) * 2 + 1] = raw[y * floatsPerRow + x * 2 + 1]!;
-      }
-    }
+    await dst.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(dst.getMappedRange().slice(0));
+    dst.unmap();
+    dst.destroy();
     return out;
   }
 
-  /** Sum of all `h` values in the water texture, in m³ (assuming dx² area each). */
+  /** Returns length width*height*2 [h, h_prev] interleaved. */
+  readWater(): Promise<Float32Array> { return this.readF32Buffer(this.water); }
+  /** Returns length width*height*2 [terrain, total] interleaved. */
+  readBed():   Promise<Float32Array> { return this.readF32Buffer(this.bed); }
+  /** Returns length width*height*2 [u, v] interleaved. */
+  readVelocity(): Promise<Float32Array> { return this.readF32Buffer(this.velocity); }
+
   async totalVolume(): Promise<number> {
     const w = await this.readWater();
     let sum = 0;
@@ -422,20 +375,12 @@ export class VirtualPipesSolver {
   }
 
   destroy(): void {
-    this.bedTex.destroy();
-    this.waterTex.destroy();
-    this.fluxLR.destroy();
-    this.fluxUD.destroy();
-    this.velocity.destroy();
-    this.chunkId.destroy();
-    this.chunkVel.destroy();
-    this.boundary.destroy();
-    this.prevBed.destroy();
-    this.forceAccum.destroy();
-    this.torqueAccum.destroy();
-    this.hDelta.destroy();
-    this.chunkCOMs.destroy();
-    this.params.destroy();
-    for (const b of this.readbackBuffers) b.destroy();
+    for (const b of [
+      this.bed, this.water, this.fluxLR, this.fluxUD, this.velocity,
+      this.chunkId, this.chunkVel, this.boundary, this.prevBed, this.hDelta,
+      this.forceAccum, this.chunkCOMs, this.params,
+    ]) {
+      b.destroy();
+    }
   }
 }

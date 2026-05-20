@@ -1,16 +1,14 @@
-// Sum per-cell water→body forces into per-chunk fixed-point atomic accumulators.
-//
-// Pure computation: no allocations. Buoyancy + hydrostatic + drag from §9.
+// Per-cell water→body forces summed into per-chunk fixed-point atomic accumulators.
+// forceAccum layout: [chunk0.fx, chunk0.fy, chunk0.fz, chunk0.tx, chunk0.ty, chunk0.tz, chunk1...]
 
 @group(0) @binding(0) var<uniform> params: SimParams;
-@group(0) @binding(1) var bedTex:    texture_storage_2d<rg32float, read>;
-@group(0) @binding(2) var waterTex:  texture_storage_2d<rg32float, read>;
-@group(0) @binding(3) var velocity:  texture_storage_2d<rg32float, read>;
-@group(0) @binding(4) var chunkId:   texture_storage_2d<r32uint,   read>;
-@group(0) @binding(5) var chunkVel:  texture_storage_2d<rgba32float, read>;
-@group(0) @binding(6) var<storage, read_write> forceAccum: array<atomic<i32>>;     // per chunk × 3
-@group(0) @binding(7) var<storage, read_write> torqueAccum: array<atomic<i32>>;    // per chunk × 3
-@group(0) @binding(8) var<uniform> chunkCOMs: array<vec4<f32>, 256>;               // x,y,z, _
+@group(0) @binding(1) var<storage, read>       bed:        array<f32>;       // 2 per cell
+@group(0) @binding(2) var<storage, read>       water:      array<f32>;       // 2 per cell
+@group(0) @binding(3) var<storage, read>       velocity:   array<f32>;       // 2 per cell
+@group(0) @binding(4) var<storage, read>       chunkId:    array<u32>;       // 1 per cell
+@group(0) @binding(5) var<storage, read>       chunkVel:   array<f32>;       // 4 per cell
+@group(0) @binding(6) var<storage, read_write> forceAccum: array<atomic<i32>>; // 6 per chunk
+@group(0) @binding(7) var<uniform>             chunkCOMs:  array<vec4<f32>, 256>;
 
 const RHO:   f32 = 1000.0;
 const G:     f32 = 9.81;
@@ -18,9 +16,9 @@ const CD:    f32 = 1.0;
 const KV:    f32 = 5000.0;
 const SCALE: f32 = 10000.0;
 
-fn safe_h(p: vec2<i32>, w: i32, h: i32) -> f32 {
-  if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) { return 0.0; }
-  return textureLoad(waterTex, p).x;
+fn safe_h(arr: ptr<storage, array<f32>, read>, p: vec2<i32>, w: i32, h: i32) -> f32 {
+  if (!in_bounds(p, w, h)) { return 0.0; }
+  return (*arr)[cell_idx(p.x, p.y, w) * 2u];
 }
 
 @compute @workgroup_size(8, 8)
@@ -29,17 +27,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let h = i32(params.height);
   let p = vec2<i32>(i32(gid.x), i32(gid.y));
   if (!in_bounds(p, w, h)) { return; }
+  let idx = cell_idx(p.x, p.y, w);
 
-  let cid = textureLoad(chunkId, p).x;
+  let cid = chunkId[idx];
   if (cid == 0u) { return; }
 
-  let h_self = textureLoad(waterTex, p).x;
+  let h_self = water[idx * 2u];
   if (h_self <= 0.0) { return; }
 
-  let vel = textureLoad(velocity, p).xy;
-  let cv  = textureLoad(chunkVel, p);
+  let vel = vec2<f32>(velocity[idx * 2u + 0u], velocity[idx * 2u + 1u]);
+  let cv  = vec4<f32>(chunkVel[idx * 4u + 0u], chunkVel[idx * 4u + 1u],
+                      chunkVel[idx * 4u + 2u], chunkVel[idx * 4u + 3u]);
 
-  // Drag (in plane).
   let rx = vel.x - cv.x;
   let rz = vel.y - cv.z;
   let speed = length(vec2<f32>(rx, rz));
@@ -47,28 +46,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let Fx_drag = drag_k * rx;
   let Fz_drag = drag_k * rz;
 
-  // Hydrostatic horizontal — wall cells against neighboring water.
-  let hL = safe_h(p + vec2<i32>(-1, 0), w, h);
-  let hR = safe_h(p + vec2<i32>(1, 0),  w, h);
-  let hD = safe_h(p + vec2<i32>(0, -1), w, h);
-  let hU = safe_h(p + vec2<i32>(0, 1),  w, h);
+  let hL = safe_h(&water, p + vec2<i32>(-1, 0), w, h);
+  let hR = safe_h(&water, p + vec2<i32>(1, 0),  w, h);
+  let hD = safe_h(&water, p + vec2<i32>(0, -1), w, h);
+  let hU = safe_h(&water, p + vec2<i32>(0, 1),  w, h);
   let Fx_hyd = 0.5 * RHO * G * (hL * hL - hR * hR) * params.dx;
   let Fz_hyd = 0.5 * RHO * G * (hD * hD - hU * hU) * params.dx;
 
-  // Buoyancy (vertical).
-  let bed_total = textureLoad(bedTex, p).y;
-  let bed_terrain = textureLoad(bedTex, p).x;
+  let bed_total   = bed[idx * 2u + 1u];
+  let bed_terrain = bed[idx * 2u + 0u];
   let submerged_h = min(h_self, max(0.0, bed_total - bed_terrain));
   let F_buoy = RHO * G * params.dx * params.dx * submerged_h;
-
-  // Vertical damping.
   let F_vdamp = -KV * min(1.0, submerged_h / max(0.05, bed_total - bed_terrain)) * cv.y * params.dx * params.dx;
 
   let Fx = Fx_drag + Fx_hyd;
   let Fy = F_buoy  + F_vdamp;
   let Fz = Fz_drag + Fz_hyd;
 
-  // Torque = r × F where r = cellPos − COM.
   let cellWorld = vec3<f32>(
     (f32(p.x) + 0.5) * params.dx,
     bed_terrain,
@@ -78,11 +72,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let r = cellWorld - com;
   let tau = cross(r, vec3<f32>(Fx, Fy, Fz));
 
-  let base = i32(cid) * 3;
+  let base = i32(cid) * 6;
   atomicAdd(&forceAccum[base + 0], i32(Fx * SCALE));
   atomicAdd(&forceAccum[base + 1], i32(Fy * SCALE));
   atomicAdd(&forceAccum[base + 2], i32(Fz * SCALE));
-  atomicAdd(&torqueAccum[base + 0], i32(tau.x * SCALE));
-  atomicAdd(&torqueAccum[base + 1], i32(tau.y * SCALE));
-  atomicAdd(&torqueAccum[base + 2], i32(tau.z * SCALE));
+  atomicAdd(&forceAccum[base + 3], i32(tau.x * SCALE));
+  atomicAdd(&forceAccum[base + 4], i32(tau.y * SCALE));
+  atomicAdd(&forceAccum[base + 5], i32(tau.z * SCALE));
 }

@@ -38,19 +38,8 @@ async function runDamBreak(
   const grid = new SimulationGrid({ width: domainCells, height: 8, dx, origin: [0, -1] });
   const solver = new VirtualPipesSolver(gpu, grid, { dt: 0.005, substepsPerFrame: 1 });
   // Seed left half with column of water.
-  const data = new Float32Array(domainCells * 8 * 2);
   const halfCells = Math.floor(domainCells / 4);
-  for (let j = 0; j < 8; j++) {
-    for (let i = 0; i < halfCells; i++) {
-      data[(j * domainCells + i) * 2] = initialDepth;
-      data[(j * domainCells + i) * 2 + 1] = initialDepth;
-    }
-  }
-  gpu.queue.writeTexture(
-    { texture: solver.waterTex }, data,
-    { bytesPerRow: domainCells * 8, rowsPerImage: 8 },
-    { width: domainCells, height: 8, depthOrArrayLayers: 1 },
-  );
+  solver.writeWaterRegion({ x: 0, y: 0, w: halfCells, h: 8 }, new Float32Array(halfCells * 8).fill(initialDepth));
   for (let s = 0; s < steps; s++) solver.step();
   const water = await solver.readWater();
   // Find rightmost wet cell along row 4.

@@ -33,14 +33,7 @@ const demo: Demo = {
     const g = ctx.solver.grid;
     // Increasing inflow at west edge.
     const tideH = Math.min(3.5, 0.5 * (ctx.scratch.t as number));
-    const data = new Float32Array(g.height * 2);
-    for (let j = 0; j < g.height; j++) { data[j * 2] = tideH; data[j * 2 + 1] = tideH; }
-    ctx.solver.ctx.queue.writeTexture(
-      { texture: ctx.solver.waterTex, origin: { x: 0, y: 0 } },
-      data,
-      { bytesPerRow: 8, rowsPerImage: g.height },
-      { width: 1, height: g.height, depthOrArrayLayers: 1 },
-    );
+    ctx.solver.writeWaterRegion({ x: 0, y: 0, w: 1, h: g.height }, new Float32Array(g.height).fill(tideH));
   },
 };
 
