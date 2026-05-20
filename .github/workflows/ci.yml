@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10.33.0'
+
+jobs:
+  unit:
+    name: Unit tests (Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter isenflow test:unit
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r typecheck
+
+  build:
+    name: Build (library + demos)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter isenflow build
+      - run: pnpm --filter demos build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demos-dist
+          path: apps/demos/dist
+          if-no-files-found: error
+
+  e2e:
+    name: Playwright (WebGPU via SwiftShader)
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install Mesa Vulkan / Lavapipe for software WebGPU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools libnss3 libxss1 libasound2t64 || \
+            sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools libnss3 libxss1 libasound2
+          vulkaninfo --summary || true
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter isenflow build
+      - run: pnpm --filter demos build
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: apps/demos
+      - name: Print Chromium + WebGPU diagnostics
+        run: |
+          which chromium 2>/dev/null || true
+          ls /opt/pw-browsers/ 2>/dev/null || true
+          /opt/pw-browsers/chromium-*/chrome-linux/chrome --version 2>/dev/null || true
+      - name: Run Playwright (start preview + tests in one shell)
+        env:
+          CI: 'true'
+        run: |
+          set -uo pipefail
+          pnpm --filter demos preview > preview.log 2>&1 &
+          PREVIEW_PID=$!
+          trap 'kill $PREVIEW_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4173 > /dev/null 2>&1; then
+              echo "preview ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -fsS http://127.0.0.1:4173 > /dev/null 2>&1; then
+            echo "::error::preview server did not become ready in 60s"
+            echo "--- preview.log ---"
+            cat preview.log || true
+            exit 1
+          fi
+          pnpm --filter demos test:e2e
+          status=$?
+          echo "--- preview.log tail ---"
+          tail -20 preview.log || true
+          exit $status
+      - if: failure()
+        name: Dump Playwright failure details to job summary
+        run: |
+          {
+            echo "## Playwright failure forensics"
+            echo
+            echo "### test-results error contexts"
+            for f in apps/demos/test-results/*/error-context.md; do
+              [ -f "$f" ] || continue
+              echo "<details><summary>$f</summary>"
+              echo
+              echo '```'
+              cat "$f"
+              echo '```'
+              echo "</details>"
+            done
+            echo
+            echo "### attached console / page-errors"
+            find apps/demos/test-results -name '*.txt' 2>/dev/null | while read -r f; do
+              echo "<details><summary>$f</summary>"
+              echo
+              echo '```'
+              head -c 4000 "$f"
+              echo '```'
+              echo "</details>"
+            done
+            echo
+            echo "### vulkaninfo"
+            echo '```'
+            vulkaninfo --summary 2>&1 | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/demos/playwright-report
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: apps/demos/test-results
+          if-no-files-found: ignore

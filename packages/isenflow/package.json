@@ -1,0 +1,49 @@
+{
+  "name": "isenflow",
+  "version": "0.1.0",
+  "description": "Real-time shallow-water simulation library: WebGPU virtual-pipes SWE solver with two-way Rapier rigid-body coupling, destruction coupling, and splash particles.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/isenflow.js",
+  "module": "./dist/isenflow.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/isenflow.js"
+    },
+    "./math": {
+      "types": "./dist/math.d.ts",
+      "import": "./dist/math.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "dev": "vite build --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'no lint configured for isenflow'",
+    "test": "vitest run",
+    "test:unit": "vitest run"
+  },
+  "peerDependencies": {
+    "@dimforge/rapier3d-compat": ">=0.14.0",
+    "three": ">=0.169.0"
+  },
+  "peerDependenciesMeta": {
+    "@dimforge/rapier3d-compat": { "optional": true },
+    "three": { "optional": true }
+  },
+  "devDependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "@types/node": "^22.10.1",
+    "@types/three": "^0.171.0",
+    "@webgpu/types": "^0.1.51",
+    "three": "^0.171.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vite-plugin-dts": "^4.3.0",
+    "vitest": "^2.1.8"
+  }
+}
