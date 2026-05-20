@@ -94,6 +94,38 @@ jobs:
       - run: pnpm --filter demos test:e2e
         env:
           CI: 'true'
+      - if: failure()
+        name: Dump Playwright failure details to job summary
+        run: |
+          {
+            echo "## Playwright failure forensics"
+            echo
+            echo "### test-results error contexts"
+            for f in apps/demos/test-results/*/error-context.md; do
+              [ -f "$f" ] || continue
+              echo "<details><summary>$f</summary>"
+              echo
+              echo '```'
+              cat "$f"
+              echo '```'
+              echo "</details>"
+            done
+            echo
+            echo "### attached console / page-errors"
+            find apps/demos/test-results -name '*.txt' 2>/dev/null | while read -r f; do
+              echo "<details><summary>$f</summary>"
+              echo
+              echo '```'
+              head -c 4000 "$f"
+              echo '```'
+              echo "</details>"
+            done
+            echo
+            echo "### vulkaninfo"
+            echo '```'
+            vulkaninfo --summary 2>&1 | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
