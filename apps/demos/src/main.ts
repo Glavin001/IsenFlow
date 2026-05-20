@@ -41,8 +41,39 @@ async function main() {
     select.appendChild(opt);
   }
 
-  const fpsEl = document.getElementById('fps')!;
-  startLoop(ctx, (fps) => (fpsEl.textContent = `${fps} fps`));
+  const $ = (id: string) => document.getElementById(id)!;
+  const fpsEl = $('hud-fps');
+  const frameMsEl = $('hud-frame-ms');
+  const simMsEl = $('hud-sim-ms');
+  const substepsEl = $('hud-substeps');
+  const simHzEl = $('hud-sim-hz');
+  const simRateEl = $('hud-sim-rate');
+  const gridEl = $('hud-grid');
+  const gpuEl = $('hud-gpu');
+  const speedEl = $('hud-speed') as HTMLInputElement;
+  const speedValEl = $('hud-speed-val');
+
+  const g = ctx.solver.grid;
+  gridEl.textContent = `${g.width}×${g.height} · dx=${g.dx}m`;
+  gpuEl.textContent = ctx.adapterInfo.length > 30 ? ctx.adapterInfo.slice(0, 30) + '…' : ctx.adapterInfo;
+  gpuEl.title = ctx.adapterInfo;
+
+  const fmt = (n: number, d = 1) => (Number.isFinite(n) ? n.toFixed(d) : '--');
+  speedEl.addEventListener('input', () => {
+    ctx.simSpeed = parseFloat(speedEl.value);
+    speedValEl.textContent = `${fmt(ctx.simSpeed, 2)}×`;
+  });
+  ctx.simSpeed = parseFloat(speedEl.value);
+  speedValEl.textContent = `${fmt(ctx.simSpeed, 2)}×`;
+
+  startLoop(ctx, (s) => {
+    fpsEl.textContent = String(s.fps);
+    frameMsEl.textContent = fmt(s.frameMsP50, 1);
+    simMsEl.textContent = fmt(s.simStepMsP50, 2);
+    substepsEl.textContent = String(s.substeps);
+    simHzEl.textContent = fmt(s.simHz, 0);
+    simRateEl.textContent = fmt(s.simRate, 2);
+  });
 
   const pickFromHash = async () => {
     const id = (location.hash.replace('#', '') || demos[0]!.id);

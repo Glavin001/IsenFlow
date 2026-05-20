@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, openDemo, assertNoErrors } from './_setup.js';
 
 const DEMOS = [
   '01-dam-break',
@@ -12,38 +12,23 @@ const DEMOS = [
 
 test('demo selector lists all demos', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('#demoSelect option')).toHaveCount(DEMOS.length);
+  await expect(page.locator('#demoSelect option')).toHaveCount(DEMOS.length, { timeout: 60_000 });
 });
 
 for (const id of DEMOS) {
-  test(`demo ${id} loads without fatal errors`, async ({ page }, testInfo) => {
-    const errors: string[] = [];
-    const consoleLog: string[] = [];
-    page.on('pageerror', (e) => errors.push(`${e.name}: ${e.message}\n${e.stack ?? ''}`));
-    page.on('console', (msg) => consoleLog.push(`[${msg.type()}] ${msg.text()}`));
-    await page.goto(`/#${id}`);
+  test(`smoke: demo ${id} loads, runs, no fatal errors`, async ({
+    page,
+    consoleErrors,
+    pageErrors,
+  }, testInfo) => {
+    await openDemo(page, testInfo, id);
     await expect(page.locator('canvas')).toBeVisible({ timeout: 30_000 });
-
-    // Give the demo a beat to surface any fatal init error.
-    await page.waitForTimeout(500);
-
-    // Always attach console + pageerrors for forensics.
-    await testInfo.attach('page-console', { body: consoleLog.join('\n'), contentType: 'text/plain' });
-    if (errors.length) {
-      await testInfo.attach('page-errors', { body: errors.join('\n\n'), contentType: 'text/plain' });
-    }
-
-    // Tolerate WebGPU-unavailable banner (CI may not have a working device).
-    const err = page.locator('#err');
-    if (await err.isVisible().catch(() => false)) {
-      const text = (await err.textContent()) ?? '';
-      const lower = text.toLowerCase();
-      if (lower.includes('webgpu') || lower.includes('adapter') || lower.includes('gpu')) {
-        test.skip(true, `WebGPU unavailable: ${text.slice(0, 200)}`);
-      }
-      throw new Error(`Demo fatal error: ${text.slice(0, 400)}`);
-    }
-    // No uncaught JS errors.
-    expect(errors, errors.join('\n')).toHaveLength(0);
+    // Let the loop run for a moment.
+    await page.waitForTimeout(800);
+    const fps = await page.evaluate(() => window.__isenflow_app!.fps());
+    expect(fps, 'fps reported').toBeGreaterThanOrEqual(0);
+    const errInfo = await page.evaluate(() => window.__isenflow_app!.err());
+    expect(errInfo.visible, `#err banner: ${errInfo.text}`).toBe(false);
+    assertNoErrors(consoleErrors, pageErrors);
   });
 }

@@ -1,5 +1,10 @@
 // Per-cell water→body forces summed into per-chunk fixed-point atomic accumulators.
+//
 // forceAccum layout: [chunk0.fx, chunk0.fy, chunk0.fz, chunk0.tx, chunk0.ty, chunk0.tz, chunk1...]
+//
+// `chunkCOMs[cid]` packs (com.x, com.y, com.z, halfHeightY) — the .w channel
+// is the body's half-extent along Y so we can derive its top/bottom from the
+// COM and compute correct buoyancy on partially-submerged floaters.
 
 @group(0) @binding(0) var<uniform> params: SimParams;
 @group(0) @binding(1) var<storage, read>       bed:        array<f32>;       // 2 per cell
@@ -32,20 +37,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cid = chunkId[idx];
   if (cid == 0u) { return; }
 
+  // h_self is water depth above bed_total (terrain, since dynamic bodies do
+  // NOT raise the bed any longer). May be 0 for wall cells — that's OK,
+  // hydrostatic horizontal pressure still applies via the neighbor diff.
   let h_self = water[idx * 2u];
-  if (h_self <= 0.0) { return; }
 
   let vel = vec2<f32>(velocity[idx * 2u + 0u], velocity[idx * 2u + 1u]);
   let cv  = vec4<f32>(chunkVel[idx * 4u + 0u], chunkVel[idx * 4u + 1u],
                       chunkVel[idx * 4u + 2u], chunkVel[idx * 4u + 3u]);
 
-  let rx = vel.x - cv.x;
-  let rz = vel.y - cv.z;
-  let speed = length(vec2<f32>(rx, rz));
-  let drag_k = 0.5 * CD * RHO * h_self * speed * params.dx;
-  let Fx_drag = drag_k * rx;
-  let Fz_drag = drag_k * rz;
+  // ----------------- DRAG (only when water present in cell) -----------------
+  var Fx_drag: f32 = 0.0;
+  var Fz_drag: f32 = 0.0;
+  if (h_self > 0.0) {
+    let rx = vel.x - cv.x;
+    let rz = vel.y - cv.z;
+    let speed = length(vec2<f32>(rx, rz));
+    let drag_k = 0.5 * CD * RHO * h_self * speed * params.dx;
+    Fx_drag = drag_k * rx;
+    Fz_drag = drag_k * rz;
+  }
 
+  // ----------------- HYDROSTATIC HORIZONTAL (independent of h_self) -----------------
   let hL = safe_h(&water, p + vec2<i32>(-1, 0), w, h);
   let hR = safe_h(&water, p + vec2<i32>(1, 0),  w, h);
   let hD = safe_h(&water, p + vec2<i32>(0, -1), w, h);
@@ -53,11 +66,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let Fx_hyd = 0.5 * RHO * G * (hL * hL - hR * hR) * params.dx;
   let Fz_hyd = 0.5 * RHO * G * (hD * hD - hU * hU) * params.dx;
 
-  let bed_total   = bed[idx * 2u + 1u];
+  // ----------------- BUOYANCY (using body COM ± halfY) -----------------
   let bed_terrain = bed[idx * 2u + 0u];
-  let submerged_h = min(h_self, max(0.0, bed_total - bed_terrain));
+  let com         = chunkCOMs[min(cid, 255u)].xyz;
+  let halfY       = chunkCOMs[min(cid, 255u)].w;
+  let body_top    = com.y + halfY;
+  let body_bot    = com.y - halfY;
+  let waterline   = bed_terrain + h_self;
+  let top_in_water = min(waterline, body_top);
+  let bot_in_water = max(bed_terrain, body_bot);
+  let submerged_h = max(0.0, top_in_water - bot_in_water);
   let F_buoy = RHO * G * params.dx * params.dx * submerged_h;
-  let F_vdamp = -KV * min(1.0, submerged_h / max(0.05, bed_total - bed_terrain)) * cv.y * params.dx * params.dx;
+
+  // ----------------- VERTICAL DAMPING -----------------
+  // Damps vertical motion when submerged. submerged_fraction in [0, 1].
+  var submerged_frac: f32 = 0.0;
+  let body_h_total = max(1e-3, 2.0 * halfY);
+  if (submerged_h > 0.0) {
+    submerged_frac = clamp(submerged_h / body_h_total, 0.0, 1.0);
+  }
+  let F_vdamp = -KV * submerged_frac * cv.y * params.dx * params.dx;
 
   let Fx = Fx_drag + Fx_hyd;
   let Fy = F_buoy  + F_vdamp;
@@ -68,7 +96,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     bed_terrain,
     (f32(p.y) + 0.5) * params.dx,
   );
-  let com = chunkCOMs[min(cid, 255u)].xyz;
   let r = cellWorld - com;
   let tau = cross(r, vec3<f32>(Fx, Fy, Fz));
 

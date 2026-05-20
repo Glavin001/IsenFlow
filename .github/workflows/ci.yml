@@ -63,9 +63,19 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    name: Playwright (WebGPU via SwiftShader)
-    runs-on: ubuntu-latest
+    name: Playwright (${{ matrix.os }}, ${{ matrix.gpu }})
     needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            gpu: software
+            project: chromium-software
+          - os: macos-14
+            gpu: real
+            project: chromium-real-gpu
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -75,7 +85,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - name: Install Mesa Vulkan / Lavapipe for software WebGPU
+      - name: Install Mesa Vulkan / Lavapipe for software WebGPU (Linux only)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libvulkan1 mesa-vulkan-drivers vulkan-tools libnss3 libxss1 libasound2t64 || \
@@ -91,6 +102,7 @@ jobs:
           which chromium 2>/dev/null || true
           ls /opt/pw-browsers/ 2>/dev/null || true
           /opt/pw-browsers/chromium-*/chrome-linux/chrome --version 2>/dev/null || true
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
       - name: Run Playwright (start preview + tests in one shell)
         env:
           CI: 'true'
@@ -112,7 +124,7 @@ jobs:
             cat preview.log || true
             exit 1
           fi
-          pnpm --filter demos test:e2e
+          pnpm --filter demos exec playwright test --project=${{ matrix.project }}
           status=$?
           echo "--- preview.log tail ---"
           tail -20 preview.log || true

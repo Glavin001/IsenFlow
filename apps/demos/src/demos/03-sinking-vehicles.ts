@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Demo, DemoContext } from '../shared/Scene.js';
+import type { Demo } from '../shared/Scene.js';
 import { ownByDemo } from '../shared/Scene.js';
 import { WaterSurface } from '../shared/Water.js';
 
@@ -7,75 +7,75 @@ const demo: Demo = {
   id: '03-sinking-vehicles',
   label: 'C. Sinking Vehicles',
   description:
-    'Two boxes fall from a bridge into a deep pond — a light wooden one floats, a heavy concrete one sinks slowly.',
+    'Two boxes fall from a bridge into a deep pond. Buoyancy and vertical damping are computed by the GPU water-coupling kernel; wood floats, concrete sinks.',
   setup(ctx) {
     const g = ctx.solver.grid;
-    // Deep pond: 3m water everywhere.
-    ctx.solver.writeWaterFull(new Float32Array(g.width * g.height).fill(3));
-    // Bridge.
+    const worldW = g.width * g.dx;
+    // Pond depth: 1.5 m everywhere.
+    ctx.solver.writeWaterFull(new Float32Array(g.width * g.height).fill(1.5));
+
     const bridge = ownByDemo(new THREE.Mesh(
-      new THREE.BoxGeometry(40, 0.6, 6),
+      new THREE.BoxGeometry(worldW * 0.85, 0.15, worldW * 0.18),
       new THREE.MeshStandardMaterial({ color: 0x555555 }),
     ));
-    bridge.position.set(0, 10, 0);
+    bridge.name = 'bridge';
+    bridge.position.set(0, 4, 0);
     ctx.scene.add(bridge);
 
-    // Wooden + concrete blocks.
+    // Wooden block (light): density 400 kg/m³.
+    const halfSide = 0.25;
     const wood = ownByDemo(new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 1.5, 1.5),
+      new THREE.BoxGeometry(halfSide * 2, halfSide * 2, halfSide * 2),
       new THREE.MeshStandardMaterial({ color: 0xaa6633 }),
     ));
-    wood.position.set(-6, 12, 0);
+    wood.name = 'wood';
+    const woodX = -worldW * 0.18;
+    wood.position.set(woodX, 5, 0);
     ctx.scene.add(wood);
-    const concrete = ownByDemo(new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 1.5, 1.5),
-      new THREE.MeshStandardMaterial({ color: 0x888888 }),
-    ));
-    concrete.position.set(6, 12, 0);
-    ctx.scene.add(concrete);
-
     const woodBody = ctx.world.createRigidBody(
-      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(-6, 12, 0).setLinearDamping(0.8),
+      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(woodX, 5, 0).setLinearDamping(0.4),
     );
     ctx.world.createCollider(
-      ctx.rapier.ColliderDesc.cuboid(0.75, 0.75, 0.75).setDensity(400),
+      ctx.rapier.ColliderDesc.cuboid(halfSide, halfSide, halfSide).setDensity(400),
       woodBody,
     );
+    ctx.spawnCoupledBody({
+      name: 'wood',
+      body: woodBody,
+      halfExtents: [halfSide, halfSide, halfSide],
+      mesh: wood,
+    });
+
+    // Concrete block (heavy): density 2400 kg/m³ — > 2× water, sinks.
+    const concrete = ownByDemo(new THREE.Mesh(
+      new THREE.BoxGeometry(halfSide * 2, halfSide * 2, halfSide * 2),
+      new THREE.MeshStandardMaterial({ color: 0x888888 }),
+    ));
+    concrete.name = 'concrete';
+    const concX = worldW * 0.18;
+    concrete.position.set(concX, 5, 0);
+    ctx.scene.add(concrete);
     const concBody = ctx.world.createRigidBody(
-      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(6, 12, 0).setLinearDamping(0.6),
+      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(concX, 5, 0).setLinearDamping(0.4),
     );
     ctx.world.createCollider(
-      ctx.rapier.ColliderDesc.cuboid(0.75, 0.75, 0.75).setDensity(2400),
+      ctx.rapier.ColliderDesc.cuboid(halfSide, halfSide, halfSide).setDensity(2400),
       concBody,
     );
+    ctx.spawnCoupledBody({
+      name: 'concrete',
+      body: concBody,
+      halfExtents: [halfSide, halfSide, halfSide],
+      mesh: concrete,
+    });
 
     const water = new WaterSurface(ctx.solver);
     ctx.scene.add(ownByDemo(water.mesh));
-
     ctx.scratch.water = water;
-    ctx.scratch.wood = wood;
-    ctx.scratch.concrete = concrete;
-    ctx.scratch.woodBody = woodBody;
-    ctx.scratch.concBody = concBody;
   },
   tick(ctx) {
     (ctx.scratch.water as WaterSurface).update();
-    const sync = (mesh: THREE.Mesh, body: ReturnType<typeof ctx.world.createRigidBody>, isLight: boolean) => {
-      const t = body.translation();
-      // crude buoyancy + drag impulse if under "water surface" (y < 3).
-      if (t.y < 3) {
-        const sub = Math.min(1, (3 - t.y) / 1.5);
-        const buoy = isLight ? 12000 : 18000;
-        body.addForce({ x: 0, y: buoy * sub, z: 0 }, true);
-        const v = body.linvel();
-        body.addForce({ x: -v.x * 500, y: -v.y * 800, z: -v.z * 500 }, true);
-      }
-      mesh.position.set(t.x, t.y, t.z);
-      const q = body.rotation();
-      mesh.quaternion.set(q.x, q.y, q.z, q.w);
-    };
-    sync(ctx.scratch.wood as THREE.Mesh, ctx.scratch.woodBody as ReturnType<typeof ctx.world.createRigidBody>, true);
-    sync(ctx.scratch.concrete as THREE.Mesh, ctx.scratch.concBody as ReturnType<typeof ctx.world.createRigidBody>, false);
+    // No manual buoyancy — coupling kernel handles it.
   },
 };
 

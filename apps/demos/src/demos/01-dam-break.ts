@@ -31,14 +31,17 @@ const demo: Demo = {
         new THREE.MeshStandardMaterial({ color: 0x806a55, roughness: 0.9 }),
       ),
     );
+    damMesh.name = 'dam';
     damMesh.position.set(g.origin[0] + (fillEnd + 0.5) * g.dx, 3, g.origin[1] + (h * g.dx) / 2);
     ctx.scene.add(damMesh);
 
-    // Tiny "village": three boxes downstream.
     const houseMat = new THREE.MeshStandardMaterial({ color: 0xc7a36a, roughness: 0.8 });
+    // Three small houses east of the dam, scaled to the world size.
+    const worldHalf = (g.width * g.dx) / 2;
     for (let k = 0; k < 3; k++) {
-      const hm = ownByDemo(new THREE.Mesh(new THREE.BoxGeometry(3, 2.5, 3), houseMat));
-      hm.position.set(8 + k * 6, 1.25, -8 + k * 6);
+      const hm = ownByDemo(new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.7, 0.8), houseMat));
+      hm.name = `house${k}`;
+      hm.position.set(worldHalf * 0.25 + k * worldHalf * 0.2, 0.35, -worldHalf * 0.3 + k * worldHalf * 0.25);
       ctx.scene.add(hm);
     }
 

@@ -29,9 +29,13 @@ export interface SolverOptions {
   readonly gravity?: number;
   readonly damping?: number;
   readonly maxChunks?: number;
+  /** Effective cross-section of a virtual pipe; default `dx²`. */
+  readonly pipeArea?: number;
+  /** Effective length of a virtual pipe; default `dx`. */
+  readonly pipeLen?: number;
 }
 
-const DEFAULT_OPTS: Required<Omit<SolverOptions, 'dt' | 'substepsPerFrame'>> = {
+const DEFAULT_OPTS: Required<Omit<SolverOptions, 'dt' | 'substepsPerFrame' | 'pipeArea' | 'pipeLen'>> = {
   gravity: 9.81,
   damping: 0.98,
   maxChunks: 256,
@@ -42,7 +46,7 @@ const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBuff
 export class VirtualPipesSolver {
   readonly ctx: GPUContext;
   readonly grid: SimulationGrid;
-  readonly opts: SolverOptions & typeof DEFAULT_OPTS;
+  readonly opts: SolverOptions & typeof DEFAULT_OPTS & { pipeArea: number; pipeLen: number };
 
   readonly bed: GPUBuffer;
   readonly water: GPUBuffer;
@@ -61,12 +65,24 @@ export class VirtualPipesSolver {
   private paramsCpu: ArrayBuffer;
   private paramsView: DataView;
 
+  /**
+   * CPU mirror of the *terrain* (.x) channel. Kept in sync by every write
+   * helper so dynamic-body rasterizers can restore terrain when a body
+   * vacates a cell without reading back from the GPU.
+   */
+  readonly terrainMirror: Float32Array;
+
   private pipelines: Record<string, GPUComputePipeline> = {};
 
   constructor(ctx: GPUContext, grid: SimulationGrid, opts: SolverOptions) {
     this.ctx = ctx;
     this.grid = grid;
-    this.opts = { ...DEFAULT_OPTS, ...opts };
+    this.opts = {
+      ...DEFAULT_OPTS,
+      pipeArea: opts.pipeArea ?? grid.dx * grid.dx,
+      pipeLen: opts.pipeLen ?? grid.dx,
+      ...opts,
+    };
     const dev = ctx.device;
     const cells = grid.width * grid.height;
 
@@ -83,11 +99,17 @@ export class VirtualPipesSolver {
 
     const chunkBytes = this.opts.maxChunks * 6 * 4;
     this.forceAccum = dev.createBuffer({ size: chunkBytes, usage: STORAGE_USAGE, label: 'isenflow.forceAccum' });
+    // The accumulate_forces shader declares `chunkCOMs` as a fixed-size
+    // `array<vec4<f32>, 256>` uniform (4096 bytes). WebGPU requires the
+    // bound buffer to be at least that large even if `maxChunks < 256`,
+    // so we always size up to 256 entries here.
     this.chunkCOMs  = dev.createBuffer({
-      size: this.opts.maxChunks * 16,
+      size: Math.max(256, this.opts.maxChunks) * 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       label: 'isenflow.chunkCOMs',
     });
+
+    this.terrainMirror = new Float32Array(cells);
 
     this.paramsCpu = new ArrayBuffer(32);
     this.paramsView = new DataView(this.paramsCpu);
@@ -101,6 +123,20 @@ export class VirtualPipesSolver {
     this.buildPipelines();
   }
 
+  /** Bytes-per-chunk in `forceAccum` (6 × i32). Useful for force readback ring sizing. */
+  get forceAccumStrideBytes(): number {
+    return 6 * 4;
+  }
+
+  /** Total size in bytes of the forceAccum buffer (maxChunks * 6 * 4). */
+  get forceAccumBytes(): number {
+    return this.opts.maxChunks * this.forceAccumStrideBytes;
+  }
+
+  get maxChunks(): number {
+    return this.opts.maxChunks;
+  }
+
   private uploadParams(): void {
     const dv = this.paramsView;
     dv.setUint32(0, this.grid.width, true);
@@ -109,19 +145,19 @@ export class VirtualPipesSolver {
     dv.setFloat32(12, this.opts.dt, true);
     dv.setFloat32(16, this.opts.gravity, true);
     dv.setFloat32(20, this.opts.damping, true);
-    dv.setFloat32(24, this.grid.dx * this.grid.dx, true);
-    dv.setFloat32(28, this.grid.dx, true);
+    dv.setFloat32(24, this.opts.pipeArea, true);
+    dv.setFloat32(28, this.opts.pipeLen, true);
     this.ctx.queue.writeBuffer(this.params, 0, this.paramsCpu);
   }
 
   private seedInitial(): void {
     const cells = this.grid.cells;
-    // Bed: terrain channel from seed, total = terrain
     const bedData = new Float32Array(cells * 2);
     for (let i = 0; i < cells; i++) {
       const b = this.grid.bedSeed[i] ?? 0;
       bedData[i * 2] = b;
       bedData[i * 2 + 1] = b;
+      this.terrainMirror[i] = b;
     }
     this.ctx.queue.writeBuffer(this.bed, 0, bedData);
 
@@ -133,7 +169,6 @@ export class VirtualPipesSolver {
       }
       this.ctx.queue.writeBuffer(this.water, 0, water);
     }
-    // prevBed = current total bed
     const prev = new Float32Array(cells);
     for (let i = 0; i < cells; i++) prev[i] = bedData[i * 2 + 1]!;
     this.ctx.queue.writeBuffer(this.prevBed, 0, prev);
@@ -202,6 +237,50 @@ export class VirtualPipesSolver {
     this.ctx.queue.submit([encoder.finish()]);
   }
 
+  /**
+   * Zero the per-chunk force/torque accumulator. Call once per frame BEFORE
+   * `accumulateForces`. Workgroup is 64-wide; we dispatch over the full
+   * `maxChunks * 6` i32 element count.
+   */
+  zeroForces(): void {
+    const elements = this.opts.maxChunks * 6;
+    const groups = Math.ceil(elements / 64);
+    const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.zeroForces' });
+    const pass = encoder.beginComputePass({ label: 'zeroForces' });
+    pass.setPipeline(this.pipelines.zeroForces!);
+    pass.setBindGroup(0, this.bindZeroForces(this.pipelines.zeroForces!));
+    pass.dispatchWorkgroups(groups, 1, 1);
+    pass.end();
+    this.ctx.queue.submit([encoder.finish()]);
+  }
+
+  /**
+   * Run the per-cell water→body force kernel, summing into `forceAccum`.
+   * Optionally records the accumulator copy for a `ForceReadback` ring.
+   */
+  accumulateForces(opts?: {
+    /** If provided, encode a copy from `forceAccum` into this destination buffer. */
+    copyTo?: GPUBuffer;
+    /** If provided, will be invoked with the encoder so callers can chain copies. */
+    onEncoder?: (encoder: GPUCommandEncoder) => void;
+  }): void {
+    const dx = Math.ceil(this.grid.width / 8);
+    const dy = Math.ceil(this.grid.height / 8);
+    const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.accumulate' });
+    const pass = encoder.beginComputePass({ label: 'accumulate' });
+    pass.setPipeline(this.pipelines.accumulate!);
+    pass.setBindGroup(0, this.bindAccumulate(this.pipelines.accumulate!));
+    pass.dispatchWorkgroups(dx, dy, 1);
+    pass.end();
+
+    if (opts?.copyTo) {
+      encoder.copyBufferToBuffer(this.forceAccum, 0, opts.copyTo, 0, this.forceAccumBytes);
+    }
+    if (opts?.onEncoder) opts.onEncoder(encoder);
+
+    this.ctx.queue.submit([encoder.finish()]);
+  }
+
   private bindFluxes(pipeline: GPUComputePipeline): GPUBindGroup {
     return this.ctx.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -265,6 +344,29 @@ export class VirtualPipesSolver {
     });
   }
 
+  private bindAccumulate(pipeline: GPUComputePipeline): GPUBindGroup {
+    return this.ctx.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.params } },
+        { binding: 1, resource: { buffer: this.bed } },
+        { binding: 2, resource: { buffer: this.water } },
+        { binding: 3, resource: { buffer: this.velocity } },
+        { binding: 4, resource: { buffer: this.chunkId } },
+        { binding: 5, resource: { buffer: this.chunkVel } },
+        { binding: 6, resource: { buffer: this.forceAccum } },
+        { binding: 7, resource: { buffer: this.chunkCOMs } },
+      ],
+    });
+  }
+
+  private bindZeroForces(pipeline: GPUComputePipeline): GPUBindGroup {
+    return this.ctx.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.forceAccum } }],
+    });
+  }
+
   // ---------- write helpers (called by demos / heightfield rasterizer) ----------
 
   /**
@@ -279,6 +381,7 @@ export class VirtualPipesSolver {
     for (let i = 0; i < values.length; i++) {
       packed[i * 2] = values[i]!;
       packed[i * 2 + 1] = values[i]!;
+      this.terrainMirror[i] = values[i]!;
     }
     this.ctx.queue.writeBuffer(this.bed, 0, packed);
   }
@@ -291,7 +394,6 @@ export class VirtualPipesSolver {
     if (values.length !== region.w * region.h) {
       throw new Error('writeBedRegion: values length mismatch');
     }
-    // Use a per-row writeBuffer for safety (avoids a full grid-sized round-trip).
     const W = this.grid.width;
     for (let row = 0; row < region.h; row++) {
       const rowOffsetCells = (region.y + row) * W + region.x;
@@ -301,8 +403,37 @@ export class VirtualPipesSolver {
         const v = values[row * region.w + i]!;
         packed[i * 2] = v;
         packed[i * 2 + 1] = v;
+        this.terrainMirror[rowOffsetCells + i] = v;
       }
       this.ctx.queue.writeBuffer(this.bed, rowOffsetCells * 2 * 4, packed.buffer, packed.byteOffset, rowBytes);
+    }
+  }
+
+  /**
+   * Stamp the total-bed channel only, leaving terrain intact. Used by the
+   * dynamic-body rasterizer so a moving crate raises the total above
+   * terrain without permanently rewriting the heightmap.
+   */
+  writeBedTotalRegion(
+    region: { x: number; y: number; w: number; h: number },
+    values: Float32Array,
+  ): void {
+    if (values.length !== region.w * region.h) {
+      throw new Error('writeBedTotalRegion: values length mismatch');
+    }
+    const W = this.grid.width;
+    for (let row = 0; row < region.h; row++) {
+      const rowOffsetCells = (region.y + row) * W + region.x;
+      // .y is at offset 4 within the 8-byte cell. Pack one row of single
+      // floats and write each float at its individual offset.
+      // We could batch into one writeBuffer per row using a view that has
+      // gaps, but WebGPU writeBuffer does not support strides. Issue per cell.
+      for (let i = 0; i < region.w; i++) {
+        const cell = rowOffsetCells + i;
+        const v = values[row * region.w + i]!;
+        const arr = new Float32Array([v]);
+        this.ctx.queue.writeBuffer(this.bed, cell * 8 + 4, arr.buffer, 0, 4);
+      }
     }
   }
 
@@ -342,6 +473,101 @@ export class VirtualPipesSolver {
     this.ctx.queue.writeBuffer(this.water, offset, data);
   }
 
+  /** Stamp a region of the per-cell `chunkId` buffer. */
+  writeChunkIdRegion(
+    region: { x: number; y: number; w: number; h: number },
+    chunkId: number,
+  ): void {
+    const W = this.grid.width;
+    const row = new Uint32Array(region.w).fill(chunkId);
+    for (let r = 0; r < region.h; r++) {
+      const rowOffsetCells = (region.y + r) * W + region.x;
+      this.ctx.queue.writeBuffer(this.chunkId, rowOffsetCells * 4, row.buffer, row.byteOffset, region.w * 4);
+    }
+  }
+
+  /**
+   * Stamp a region of the per-cell `chunkVel` buffer (4 floats per cell:
+   * vx, vy, vz, speed).
+   */
+  writeChunkVelRegion(
+    region: { x: number; y: number; w: number; h: number },
+    vx: number,
+    vy: number,
+    vz: number,
+  ): void {
+    const W = this.grid.width;
+    const speed = Math.hypot(vx, vy, vz);
+    const row = new Float32Array(region.w * 4);
+    for (let i = 0; i < region.w; i++) {
+      row[i * 4 + 0] = vx;
+      row[i * 4 + 1] = vy;
+      row[i * 4 + 2] = vz;
+      row[i * 4 + 3] = speed;
+    }
+    for (let r = 0; r < region.h; r++) {
+      const rowOffsetCells = (region.y + r) * W + region.x;
+      this.ctx.queue.writeBuffer(
+        this.chunkVel,
+        rowOffsetCells * 16,
+        row.buffer,
+        row.byteOffset,
+        region.w * 16,
+      );
+    }
+  }
+
+  /** Reset the chunk-id buffer to zero (no chunks anywhere). */
+  clearChunkIds(): void {
+    const zeros = new Uint32Array(this.grid.cells);
+    this.ctx.queue.writeBuffer(this.chunkId, 0, zeros);
+  }
+
+  /** Reset the chunk-velocity buffer. */
+  clearChunkVel(): void {
+    const zeros = new Float32Array(this.grid.cells * 4);
+    this.ctx.queue.writeBuffer(this.chunkVel, 0, zeros);
+  }
+
+  /**
+   * Upload per-chunk centre-of-mass + half-height-Y as a single (x, y, z, halfY)
+   * vec4 array, sized for `maxChunks`. The shader uses `halfY` to derive
+   * the body's top/bottom for buoyancy and vertical-damping forces.
+   *
+   * `data.length` must be `≥ maxChunks * 4`.
+   */
+  writeChunkCOMs(data: Float32Array): void {
+    const required = this.opts.maxChunks * 4;
+    const padded = data.length === required ? data : (() => {
+      const p = new Float32Array(required);
+      p.set(data.subarray(0, Math.min(data.length, required)));
+      return p;
+    })();
+    this.ctx.queue.writeBuffer(this.chunkCOMs, 0, padded.buffer, padded.byteOffset, padded.byteLength);
+  }
+
+  /** Set a single chunk's COM (x, y, z) and half-height-Y. */
+  writeChunkCOM(chunkId: number, x: number, y: number, z: number, halfY = 0): void {
+    if (chunkId < 0 || chunkId >= this.opts.maxChunks) {
+      throw new Error(`writeChunkCOM: chunkId ${chunkId} out of range [0, ${this.opts.maxChunks})`);
+    }
+    const arr = new Float32Array([x, y, z, halfY]);
+    this.ctx.queue.writeBuffer(this.chunkCOMs, chunkId * 16, arr);
+  }
+
+  /** Stamp a region of the per-cell boundary buffer. */
+  writeBoundaryRegion(
+    region: { x: number; y: number; w: number; h: number },
+    boundaryType: number,
+  ): void {
+    const W = this.grid.width;
+    const row = new Uint32Array(region.w).fill(boundaryType);
+    for (let r = 0; r < region.h; r++) {
+      const rowOffsetCells = (region.y + r) * W + region.x;
+      this.ctx.queue.writeBuffer(this.boundary, rowOffsetCells * 4, row.buffer, row.byteOffset, region.w * 4);
+    }
+  }
+
   // ---------- readback helpers ----------
 
   private async readF32Buffer(buf: GPUBuffer): Promise<Float32Array> {
@@ -365,6 +591,26 @@ export class VirtualPipesSolver {
   readBed():   Promise<Float32Array> { return this.readF32Buffer(this.bed); }
   /** Returns length width*height*2 [u, v] interleaved. */
   readVelocity(): Promise<Float32Array> { return this.readF32Buffer(this.velocity); }
+
+  /**
+   * Read back the raw force accumulator buffer. Each chunk has 6 i32 entries
+   * (fx, fy, fz, tx, ty, tz) in fixed-point — divide by `FIXED_POINT_SCALE`
+   * (10000) to get Newtons / Newton-metres.
+   */
+  async readForceAccum(): Promise<Int32Array> {
+    const dst = this.ctx.device.createBuffer({
+      size: this.forceAccumBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = this.ctx.device.createCommandEncoder();
+    enc.copyBufferToBuffer(this.forceAccum, 0, dst, 0, this.forceAccumBytes);
+    this.ctx.queue.submit([enc.finish()]);
+    await dst.mapAsync(GPUMapMode.READ);
+    const out = new Int32Array(dst.getMappedRange().slice(0));
+    dst.unmap();
+    dst.destroy();
+    return out;
+  }
 
   async totalVolume(): Promise<number> {
     const w = await this.readWater();

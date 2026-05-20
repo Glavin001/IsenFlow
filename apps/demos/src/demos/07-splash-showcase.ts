@@ -37,6 +37,7 @@ const demo: Demo = {
       depthWrite: false,
     });
     const points = ownByDemo(new THREE.Points(geom, mat));
+    points.name = 'splashPoints';
     points.frustumCulled = false;
     ctx.scene.add(points);
     ctx.scratch.particlesPositions = positions;
@@ -51,6 +52,7 @@ const demo: Demo = {
       const px = (Math.random() - 0.5) * 30;
       const pz = (Math.random() - 0.5) * 30;
       ctx.splashes.spawn({ position: [px, 2, pz], intensity: 1.0, upwardSpeed: 6 });
+      ctx.scratch.splashCount = ((ctx.scratch.splashCount as number) ?? 0) + 1;
     }
     const positions = ctx.scratch.particlesPositions as Float32Array;
     const geom = ctx.scratch.particlesGeom as THREE.BufferGeometry;
