@@ -91,23 +91,32 @@ jobs:
           which chromium 2>/dev/null || true
           ls /opt/pw-browsers/ 2>/dev/null || true
           /opt/pw-browsers/chromium-*/chrome-linux/chrome --version 2>/dev/null || true
-      - name: Start Vite preview server
+      - name: Run Playwright (start preview + tests in one shell)
+        env:
+          CI: 'true'
         run: |
+          set -uo pipefail
           pnpm --filter demos preview > preview.log 2>&1 &
-          echo $! > preview.pid
+          PREVIEW_PID=$!
+          trap 'kill $PREVIEW_PID 2>/dev/null || true' EXIT
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:4173 > /dev/null 2>&1; then
               echo "preview ready after ${i}s"
-              exit 0
+              break
             fi
             sleep 1
           done
-          echo "::error::preview server did not become ready in 60s"
-          cat preview.log
-          exit 1
-      - run: pnpm --filter demos test:e2e
-        env:
-          CI: 'true'
+          if ! curl -fsS http://127.0.0.1:4173 > /dev/null 2>&1; then
+            echo "::error::preview server did not become ready in 60s"
+            echo "--- preview.log ---"
+            cat preview.log || true
+            exit 1
+          fi
+          pnpm --filter demos test:e2e
+          status=$?
+          echo "--- preview.log tail ---"
+          tail -20 preview.log || true
+          exit $status
       - if: failure()
         name: Dump Playwright failure details to job summary
         run: |

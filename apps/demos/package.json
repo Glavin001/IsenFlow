@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --port 4173 --strictPort",
+    "preview": "vite preview --port 4173 --strictPort --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "lint": "echo 'no lint configured for demos'",
     "test": "echo 'demos tests live in tests/ run via playwright'",
