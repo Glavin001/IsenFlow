@@ -77,6 +77,13 @@ const demo: Demo = {
     }
     ctx.solver.writeBedRegion({ x: 0, y: H - BORDER_THICKNESS, w: W, h: BORDER_THICKNESS }, south);
 
+    // Mark breach cells as Inflow boundary (target depth updated per frame in tick).
+    ctx.solver.writeBoundaryRegionTarget(
+      { x: breachI0, y: H - BORDER_THICKNESS, w: breachW, h: BORDER_THICKNESS },
+      4, // Inflow
+      0,
+    );
+
     // Visualise borders as a single thin frame.
     const worldW = W * g.dx;
     const worldH = H * g.dx;
@@ -254,9 +261,13 @@ const demo: Demo = {
     const breachI1 = ctx.scratch.breachI1 as number;
     const breachW = breachI1 - breachI0;
     if (breachW > 0) {
-      const flood = new Float32Array(breachW).fill(tideH);
-      ctx.solver.writeWaterRegion({ x: breachI0, y: g.height - 1, w: breachW, h: 1 }, flood);
-      ctx.solver.writeWaterRegion({ x: breachI0, y: g.height - 2, w: breachW, h: 1 }, flood);
+      // Use Inflow boundary: pins h >= target without overwriting h_prev,
+      // preserving velocity reconstruction at boundary cells.
+      ctx.solver.writeBoundaryRegionTarget(
+        { x: breachI0, y: g.height - 2, w: breachW, h: 2 },
+        4, // Inflow
+        tideH,
+      );
     }
   },
 };

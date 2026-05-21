@@ -155,7 +155,7 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
   const solver = new VirtualPipesSolver(gpu, grid, {
     dt: 1 / 240,
     substepsPerFrame: 1,
-    damping: 0.5,
+    damping: 0.9,
     manningN: 0.03,
   });
   const rasterizer = new HeightfieldRasterizer(solver);

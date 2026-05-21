@@ -92,6 +92,14 @@ async function main() {
   });
   window.addEventListener('hashchange', () => { void pickFromHash(); });
 
+  // Press "R" to reset the current demo without switching.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+      void pickFromHash();
+    }
+  });
+
   await pickFromHash();
 }
 

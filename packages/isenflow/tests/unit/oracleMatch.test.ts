@@ -13,6 +13,7 @@ import {
   createCpuState,
   createCpuParams,
 } from '../../src/core/cpu/CpuVirtualPipes.js';
+import { stokerFrontPosition } from '../../src/math/swashes.js';
 
 describe('CPU Oracle — algebraic correctness', () => {
   it('flat basin stays flat (lake-at-rest)', () => {
@@ -255,6 +256,128 @@ describe('CPU Oracle — wave celerity', () => {
     // Within 30% (virtual pipes is dispersive)
     expect(simSpeed).toBeGreaterThan(theoreticalSpeed * 0.5);
     expect(simSpeed).toBeLessThan(theoreticalSpeed * 1.5);
+  });
+});
+
+describe('CPU Oracle — dam-break propagation', () => {
+  it('1D dam-break front advances and depth at dam is reasonable', () => {
+    // Virtual Pipes is diffusive for sharp fronts (no Riemann solver), so we
+    // test qualitative correctness: front advances, depth at dam is in a
+    // physically plausible range, and mass is conserved.
+    const W = 512, H = 4, dx = 0.1;
+    const state = createCpuState(W, H);
+    const params = createCpuParams(W, H, { dx, dt: 0.0005, damping: 1.0, manningN: 0 });
+
+    const H0 = 2.0;
+    const damI = Math.floor(W / 2);
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const h = i < damI ? H0 : 0.0;
+        state.water[(j * W + i) * 2] = h;
+        state.water[(j * W + i) * 2 + 1] = h;
+      }
+    }
+
+    const vol0 = computeVolume(state.water, W * H, dx);
+    const nSteps = 2000; // t = 1.0s
+    for (let s = 0; s < nSteps; s++) cpuStep(state, params);
+
+    // Front must advance at least 1m (proves depth-dependent pipe area works)
+    const midJ = Math.floor(H / 2);
+    let frontI = damI;
+    for (let i = W - 1; i > damI; i--) {
+      if (state.water[(midJ * W + i) * 2]! > 0.001) {
+        frontI = i;
+        break;
+      }
+    }
+    const simFrontX = (frontI - damI) * dx;
+    expect(simFrontX).toBeGreaterThan(1.0);
+
+    // Depth at dam should be between 0.5 and 1.5 (Stoker gives 4H0/9 ≈ 0.889)
+    const hAtDam = state.water[(midJ * W + damI) * 2]!;
+    expect(hAtDam).toBeGreaterThan(0.5);
+    expect(hAtDam).toBeLessThan(1.5);
+
+    // Mass conservation
+    const vol1 = computeVolume(state.water, W * H, dx);
+    expect(Math.abs(vol1 - vol0) / vol0).toBeLessThan(0.01);
+  });
+});
+
+describe('CPU Oracle — dt-independence (Dagenais damping)', () => {
+  it('same sim time with different dt produces similar depth profile', () => {
+    const W = 32, H = 32, dx = 0.5;
+
+    const runSim = (dt: number, steps: number) => {
+      const state = createCpuState(W, H);
+      const params = createCpuParams(W, H, { dx, dt, damping: 0.9, manningN: 0 });
+      for (let j = 0; j < H; j++) {
+        for (let i = 0; i < W; i++) {
+          const cx = i - W / 2, cy = j - H / 2;
+          const h = 1.0 + 0.3 * Math.exp(-(cx * cx + cy * cy) / 8);
+          state.water[(j * W + i) * 2] = h;
+          state.water[(j * W + i) * 2 + 1] = h;
+        }
+      }
+      for (let s = 0; s < steps; s++) cpuStep(state, params);
+      return state.water;
+    };
+
+    // Both run to t = 1.0s
+    const waterA = runSim(0.005, 200);
+    const waterB = runSim(0.001, 1000);
+
+    // L2 norm of depth difference
+    let diffSq = 0, normSq = 0;
+    for (let i = 0; i < W * H; i++) {
+      const hA = waterA[i * 2]!;
+      const hB = waterB[i * 2]!;
+      diffSq += (hA - hB) ** 2;
+      normSq += hA ** 2;
+    }
+    const relL2 = Math.sqrt(diffSq / Math.max(normSq, 1e-12));
+    expect(relL2).toBeLessThan(0.05); // < 5%
+  });
+});
+
+describe('CPU Oracle — tighter wave celerity (undamped)', () => {
+  it('linear wave speed within 30% of sqrt(g*h) with no damping', () => {
+    const W = 256, H = 4, dx = 0.1;
+    const state = createCpuState(W, H);
+    const params = createCpuParams(W, H, { dx, dt: 0.001, damping: 1.0, manningN: 0 });
+
+    const h0 = 1.0;
+    const pertI = Math.floor(W / 4);
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        let h = h0;
+        if (Math.abs(i - pertI) < 3) h += 0.01 * Math.exp(-((i - pertI) ** 2) / 2);
+        state.water[(j * W + i) * 2] = h;
+        state.water[(j * W + i) * 2 + 1] = h;
+      }
+    }
+
+    const nSteps = 500;
+    for (let s = 0; s < nSteps; s++) cpuStep(state, params);
+
+    const midJ = Math.floor(H / 2);
+    let frontI = pertI;
+    for (let i = W - 1; i > pertI; i--) {
+      if (Math.abs(state.water[(midJ * W + i) * 2]! - h0) > 0.0001) {
+        frontI = i;
+        break;
+      }
+    }
+
+    const simDist = (frontI - pertI) * dx;
+    const simTime = nSteps * 0.001;
+    const simSpeed = simDist / simTime;
+    const theoreticalSpeed = Math.sqrt(9.81 * h0);
+
+    // Tighter bounds: within 30%
+    expect(simSpeed).toBeGreaterThan(theoreticalSpeed * 0.7);
+    expect(simSpeed).toBeLessThan(theoreticalSpeed * 1.3);
   });
 });
 

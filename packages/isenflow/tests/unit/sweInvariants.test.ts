@@ -134,6 +134,52 @@ describe('Physical invariants — CPU oracle', () => {
   });
 });
 
+describe('Physical invariants — production params (damping=0.9, manning=0.03)', () => {
+  it('mass conservation over 10000 steps', () => {
+    const W = 32, H = 32, dx = 0.5;
+    const state = createCpuState(W, H);
+    const params = createCpuParams(W, H, { dx, dt: 0.005, damping: 0.9, manningN: 0.03 });
+
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const cx = i - W / 2, cy = j - H / 2;
+        state.water[(j * W + i) * 2] = 1.0 + 0.4 * Math.exp(-(cx * cx + cy * cy) / 16);
+        state.water[(j * W + i) * 2 + 1] = state.water[(j * W + i) * 2]!;
+      }
+    }
+
+    const vol0 = volume(state.water, W * H, dx);
+    for (let s = 0; s < 10000; s++) cpuStep(state, params);
+    const vol1 = volume(state.water, W * H, dx);
+
+    expect(Math.abs(vol1 - vol0) / vol0).toBeLessThan(0.01);
+  });
+
+  it('energy decays monotonically with damping=0.9', () => {
+    const W = 32, H = 32, dx = 0.5;
+    const state = createCpuState(W, H);
+    const params = createCpuParams(W, H, { dx, dt: 0.005, damping: 0.9, manningN: 0 });
+
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const cx = i - W / 2, cy = j - H / 2;
+        state.water[(j * W + i) * 2] = 1.0 + 0.5 * Math.exp(-(cx * cx + cy * cy) / 8);
+        state.water[(j * W + i) * 2 + 1] = state.water[(j * W + i) * 2]!;
+      }
+    }
+
+    let prevEnergy = totalEnergy(state, W, H, dx);
+    let violations = 0;
+    for (let s = 0; s < 200; s++) {
+      cpuStep(state, params);
+      const E = totalEnergy(state, W, H, dx);
+      if (E > prevEnergy * 1.001) violations++;
+      prevEnergy = E;
+    }
+    expect(violations).toBeLessThan(10);
+  });
+});
+
 // Helpers
 function volume(water: Float32Array, cells: number, dx: number): number {
   const area = dx * dx;

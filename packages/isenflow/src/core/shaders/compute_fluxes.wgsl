@@ -40,44 +40,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dh_D = eta_self - eta_D;
   let dh_U = eta_self - eta_U;
 
-  let accel = params.gravity * params.pipeArea / params.pipeLen;
+  // Neighbor depths (needed for depth-dependent pipe area and Manning friction)
+  let h_L_nbr = h_at(&water, p_L, w, h);
+  let h_R_nbr = h_at(&water, p_R, w, h);
+  let h_D_nbr = h_at(&water, p_D, w, h);
+  let h_U_nbr = h_at(&water, p_U, w, h);
+
+  // Depth-dependent pipe area: A = h_avg · dx, L = dx → A/L = h_avg.
+  // This gives the correct SWE wave speed c = √(g·h) instead of c = √(g·dx).
+  // Mei 2007 §3.2.1: for a 2D heightfield the pipe cross-section is the
+  // water depth at the face, not the cell area.
+  let hpipe_L = max(0.01, 0.5 * (h_self + h_L_nbr));
+  let hpipe_R = max(0.01, 0.5 * (h_self + h_R_nbr));
+  let hpipe_D = max(0.01, 0.5 * (h_self + h_D_nbr));
+  let hpipe_U = max(0.01, 0.5 * (h_self + h_U_nbr));
 
   // Current outflow rates: lr.x=left, lr.y=right; ud.x=down, ud.y=up
   var lr = vec2<f32>(fluxLR[idx * 2u + 0u], fluxLR[idx * 2u + 1u]);
   var ud = vec2<f32>(fluxUD[idx * 2u + 0u], fluxUD[idx * 2u + 1u]);
 
-  lr.x = max(0.0, lr.x * params.damping + params.dt * accel * dh_L);
-  lr.y = max(0.0, lr.y * params.damping + params.dt * accel * dh_R);
-  ud.x = max(0.0, ud.x * params.damping + params.dt * accel * dh_D);
-  ud.y = max(0.0, ud.y * params.damping + params.dt * accel * dh_U);
+  // Mei 2007 eqs. 2-5: accel = g · A/L = g · h_pipe (per face)
+  lr.x = max(0.0, lr.x * params.damping + params.dt * params.gravity * hpipe_L * dh_L);
+  lr.y = max(0.0, lr.y * params.damping + params.dt * params.gravity * hpipe_R * dh_R);
+  ud.x = max(0.0, ud.x * params.damping + params.dt * params.gravity * hpipe_D * dh_D);
+  ud.y = max(0.0, ud.y * params.damping + params.dt * params.gravity * hpipe_U * dh_U);
 
   // Manning bed-friction (SWASHES §1 eqs. 1-2, semi-implicit).
   // cf = g·n²/h^(4/3), attenuate: q' = q / (1 + dt·cf·|u|)
   if (params.manningN > 0.0) {
-    let h_L_nbr = h_at(&water, p_L, w, h);
-    let h_R_nbr = h_at(&water, p_R, w, h);
-    let h_D_nbr = h_at(&water, p_D, w, h);
-    let h_U_nbr = h_at(&water, p_U, w, h);
     let n2 = params.manningN * params.manningN;
 
-    var h_pipe_L = max(0.01, 0.5 * (h_self + h_L_nbr));
-    var speed_L  = abs(lr.x) / (params.dx * h_pipe_L);
-    var cf_L     = params.gravity * n2 / pow(h_pipe_L, 4.0/3.0);
+    var speed_L  = abs(lr.x) / (params.dx * hpipe_L);
+    var cf_L     = params.gravity * n2 / pow(hpipe_L, 4.0/3.0);
     lr.x = lr.x / (1.0 + params.dt * cf_L * speed_L);
 
-    var h_pipe_R = max(0.01, 0.5 * (h_self + h_R_nbr));
-    var speed_R  = abs(lr.y) / (params.dx * h_pipe_R);
-    var cf_R     = params.gravity * n2 / pow(h_pipe_R, 4.0/3.0);
+    var speed_R  = abs(lr.y) / (params.dx * hpipe_R);
+    var cf_R     = params.gravity * n2 / pow(hpipe_R, 4.0/3.0);
     lr.y = lr.y / (1.0 + params.dt * cf_R * speed_R);
 
-    var h_pipe_D = max(0.01, 0.5 * (h_self + h_D_nbr));
-    var speed_D  = abs(ud.x) / (params.dx * h_pipe_D);
-    var cf_D     = params.gravity * n2 / pow(h_pipe_D, 4.0/3.0);
+    var speed_D  = abs(ud.x) / (params.dx * hpipe_D);
+    var cf_D     = params.gravity * n2 / pow(hpipe_D, 4.0/3.0);
     ud.x = ud.x / (1.0 + params.dt * cf_D * speed_D);
 
-    var h_pipe_U = max(0.01, 0.5 * (h_self + h_U_nbr));
-    var speed_U  = abs(ud.y) / (params.dx * h_pipe_U);
-    var cf_U     = params.gravity * n2 / pow(h_pipe_U, 4.0/3.0);
+    var speed_U  = abs(ud.y) / (params.dx * hpipe_U);
+    var cf_U     = params.gravity * n2 / pow(hpipe_U, 4.0/3.0);
     ud.y = ud.y / (1.0 + params.dt * cf_U * speed_U);
   }
 

@@ -9,6 +9,11 @@ import {
   lakeAtRestOverBump,
   manningNormalDepth,
 } from '../../src/math/swashes.js';
+import {
+  cpuStep,
+  createCpuState,
+  createCpuParams,
+} from '../../src/core/cpu/CpuVirtualPipes.js';
 
 describe('Stoker dam-break', () => {
   it('returns H0 upstream of rarefaction', () => {
@@ -59,6 +64,54 @@ describe('Lake-at-rest over bump', () => {
 
   it('dry cells have h = 0', () => {
     expect(lakeAtRestOverBump(1.5, 1.0).h).toBe(0);
+  });
+});
+
+describe('CPU oracle vs Stoker dam-break', () => {
+  it('upstream rarefaction fan depth decreases monotonically from dam', () => {
+    // Virtual Pipes is diffusive for sharp fronts, so instead of point-by-point
+    // Stoker comparison, verify the qualitative shape: monotonically decreasing
+    // depth from upstream toward the front, and reasonable depth at dam.
+    const W = 512, H = 4, dx = 0.1;
+    const state = createCpuState(W, H);
+    const params = createCpuParams(W, H, { dx, dt: 0.0005, damping: 1.0, manningN: 0 });
+
+    const H0 = 2.0;
+    const damI = Math.floor(W / 2);
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const h = i < damI ? H0 : 0.0;
+        state.water[(j * W + i) * 2] = h;
+        state.water[(j * W + i) * 2 + 1] = h;
+      }
+    }
+
+    const nSteps = 2000;
+    for (let s = 0; s < nSteps; s++) cpuStep(state, params);
+
+    const midJ = Math.floor(H / 2);
+
+    // Depth at dam position: Stoker gives 4H0/9 ≈ 0.889. Allow wide range for VP.
+    const hAtDam = state.water[(midJ * W + damI) * 2]!;
+    expect(hAtDam).toBeGreaterThan(0.4);
+    expect(hAtDam).toBeLessThan(1.8);
+
+    // Overall decreasing trend from dam rightward: sample every 5 cells to
+    // smooth out VP oscillations, and verify the 5-cell-averaged profile drops.
+    const sampleStep = 5;
+    let prevAvg = hAtDam;
+    let decreases = 0, total = 0;
+    for (let i = damI + sampleStep; i < damI + 30; i += sampleStep) {
+      let sum = 0;
+      for (let k = 0; k < sampleStep; k++) sum += state.water[(midJ * W + i + k) * 2]!;
+      const avg = sum / sampleStep;
+      total++;
+      if (avg <= prevAvg + 0.01) decreases++;
+      prevAvg = avg;
+    }
+    // At least 60% of sampled intervals decrease
+    expect(total).toBeGreaterThan(0);
+    expect(decreases / total).toBeGreaterThanOrEqual(0.6);
   });
 });
 

@@ -7,7 +7,7 @@ const demo: Demo = {
   id: '01-dam-break',
   label: 'A. Classic Dam Break',
   description:
-    'Reservoir behind a 4 m tall dam; the dam vanishes at t=2s and the wave rolls across a dry bed toward a small village.',
+    'Reservoir behind a 4 m tall dam; the dam vanishes at t=2 s and the flood wave cascades over a ridge and pools in a downstream valley before reaching a small village.',
 
   setup(ctx: DemoContext) {
     const g = ctx.solver.grid;
@@ -24,6 +24,48 @@ const demo: Demo = {
     const dam = new Float32Array(h).fill(6);
     ctx.solver.writeBedRegion({ x: fillEnd, y: 0, w: 1, h }, dam);
 
+    // === Downstream terrain: ridge + valley ===
+    // A low ridge at ~55% of domain width, and a shallow valley behind it.
+    // The wave must crest the ridge, then pool in the valley before continuing.
+    const ridgeI = Math.floor(w * 0.55);
+    const valleyI = Math.floor(w * 0.65);
+    const ridgeH = 0.8; // 0.8m tall ridge
+    const valleyD = 0.4; // 0.4m deep valley (bed goes negative)
+    const ridgeW = Math.max(3, Math.round(0.6 / g.dx)); // ~0.6m wide
+    const valleyW = Math.max(5, Math.round(1.5 / g.dx)); // ~1.5m wide
+
+    // Ridge: smooth bump using Gaussian-ish profile
+    const terrainBuf = new Float32Array(w);
+    for (let i = 0; i < w; i++) {
+      const dRidge = (i - ridgeI) * g.dx;
+      const dValley = (i - valleyI) * g.dx;
+      const rSigma = ridgeW * g.dx * 0.4;
+      const vSigma = valleyW * g.dx * 0.4;
+      terrainBuf[i] = ridgeH * Math.exp(-(dRidge * dRidge) / (2 * rSigma * rSigma))
+                     - valleyD * Math.exp(-(dValley * dValley) / (2 * vSigma * vSigma));
+    }
+    // Apply terrain across full height of domain
+    for (let j = 0; j < h; j++) {
+      ctx.solver.writeBedRegion(
+        { x: 0, y: j, w, h: 1 },
+        terrainBuf,
+      );
+    }
+    // Re-stamp the dam (terrain write above may have overwritten it)
+    ctx.solver.writeBedRegion({ x: fillEnd, y: 0, w: 1, h }, new Float32Array(h).fill(6));
+
+    // Visualize terrain: ridge mesh
+    const ridgeMat = new THREE.MeshStandardMaterial({ color: 0x6b8e5a, roughness: 1 });
+    const ridgeMesh = ownByDemo(
+      new THREE.Mesh(
+        new THREE.BoxGeometry(ridgeW * g.dx * 2, ridgeH, h * g.dx),
+        ridgeMat,
+      ),
+    );
+    ridgeMesh.name = 'ridge';
+    ridgeMesh.position.set(g.origin[0] + ridgeI * g.dx, ridgeH / 2, g.origin[1] + (h * g.dx) / 2);
+    ctx.scene.add(ridgeMesh);
+
     // Visualize dam.
     const damMesh = ownByDemo(
       new THREE.Mesh(
@@ -36,7 +78,7 @@ const demo: Demo = {
     ctx.scene.add(damMesh);
 
     const houseMat = new THREE.MeshStandardMaterial({ color: 0xc7a36a, roughness: 0.8 });
-    // Three small houses east of the dam, scaled to the world size.
+    // Three small houses east of the valley, scaled to the world size.
     const worldHalf = (g.width * g.dx) / 2;
     for (let k = 0; k < 3; k++) {
       const hm = ownByDemo(new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.7, 0.8), houseMat));

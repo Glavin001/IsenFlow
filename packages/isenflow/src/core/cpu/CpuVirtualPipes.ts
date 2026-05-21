@@ -87,12 +87,11 @@ export function cpuStep(state: CpuPipesState, params: CpuPipesParams): void {
  * SWASHES §1 for Manning friction).
  */
 export function cpuComputeFluxes(state: CpuPipesState, params: CpuPipesParams): void {
-  const { width: W, height: H, dx, dt, gravity, damping, pipeArea, pipeLen, manningN, boundary } = params;
+  const { width: W, height: H, dx, dt, gravity, damping, manningN, boundary } = params;
   const { bed, water, fluxLR, fluxUD } = state;
 
   // Dagenais 2018 eq. (1): dt-independent damping ζ = ω^dt
   const zeta = Math.pow(damping, dt);
-  const accel = gravity * pipeArea / pipeLen;
 
   for (let j = 0; j < H; j++) {
     for (let i = 0; i < W; i++) {
@@ -111,25 +110,36 @@ export function cpuComputeFluxes(state: CpuPipesState, params: CpuPipesParams): 
       const dhD = etaSelf - etaD;
       const dhU = etaSelf - etaU;
 
-      // Mei 2007 eqs. 2-5: flux update with damping
-      let fL = Math.max(0, fluxLR[ci * 2]! * zeta + dt * accel * dhL);
-      let fR = Math.max(0, fluxLR[ci * 2 + 1]! * zeta + dt * accel * dhR);
-      let fD = Math.max(0, fluxUD[ci * 2]! * zeta + dt * accel * dhD);
-      let fU = Math.max(0, fluxUD[ci * 2 + 1]! * zeta + dt * accel * dhU);
+      // Depth-dependent pipe area: A = h_avg · dx, L = dx → A/L = h_avg.
+      // Gives correct SWE wave speed c = √(g·h) instead of c = √(g·dx).
+      const hL_nbr = hAt(water, i - 1, j, W, H);
+      const hR_nbr = hAt(water, i + 1, j, W, H);
+      const hD_nbr = hAt(water, i, j - 1, W, H);
+      const hU_nbr = hAt(water, i, j + 1, W, H);
+
+      const hpipeL = Math.max(0.01, 0.5 * (hSelf + hL_nbr));
+      const hpipeR = Math.max(0.01, 0.5 * (hSelf + hR_nbr));
+      const hpipeD = Math.max(0.01, 0.5 * (hSelf + hD_nbr));
+      const hpipeU = Math.max(0.01, 0.5 * (hSelf + hU_nbr));
+
+      // Mei 2007 eqs. 2-5: flux update with damping, accel = g · h_pipe
+      let fL = Math.max(0, fluxLR[ci * 2]! * zeta + dt * gravity * hpipeL * dhL);
+      let fR = Math.max(0, fluxLR[ci * 2 + 1]! * zeta + dt * gravity * hpipeR * dhR);
+      let fD = Math.max(0, fluxUD[ci * 2]! * zeta + dt * gravity * hpipeD * dhD);
+      let fU = Math.max(0, fluxUD[ci * 2 + 1]! * zeta + dt * gravity * hpipeU * dhU);
 
       // Manning friction (SWASHES §1 eqs. 1-2, semi-implicit)
       if (manningN > 0) {
-        const applyManning = (flux: number, hNeighbor: number): number => {
-          const hPipe = Math.max(0.01, 0.5 * (hSelf + hNeighbor));
+        const applyManning = (flux: number, hPipe: number): number => {
           const qAbs = Math.abs(flux);
           const speed = qAbs / (dx * hPipe);
           const cf = gravity * manningN * manningN / Math.pow(hPipe, 4.0 / 3.0);
           return flux / (1.0 + dt * cf * speed);
         };
-        fL = applyManning(fL, hAt(water, i - 1, j, W, H));
-        fR = applyManning(fR, hAt(water, i + 1, j, W, H));
-        fD = applyManning(fD, hAt(water, i, j - 1, W, H));
-        fU = applyManning(fU, hAt(water, i, j + 1, W, H));
+        fL = applyManning(fL, hpipeL);
+        fR = applyManning(fR, hpipeR);
+        fD = applyManning(fD, hpipeD);
+        fU = applyManning(fU, hpipeU);
       }
 
       // Outflow scaling to prevent over-drain

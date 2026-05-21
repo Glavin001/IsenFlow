@@ -7,10 +7,9 @@ import {
   assertPerformance,
 } from '../_setup.js';
 
-// FIXME: with the 256² grid the wave needs more sim time to traverse 30+ m
-// of dry bed and slip through the 1 m door. Rebalance the door geometry &
-// tide ramp before re-enabling.
-test.describe.skip('demo 04 — building flood', () => {
+// Grid is 384² at dx≈0.0417m (16m world). With depth-dependent pipe area,
+// c ≈ √(g·h) ≈ 3-5 m/s, so the ~8.75m from breach to door takes ~2-3s.
+test.describe('demo 04 — building flood', () => {
   test('south-edge tide rises, water enters via door, north wall holds', async ({
     page,
     consoleErrors,
@@ -19,9 +18,9 @@ test.describe.skip('demo 04 — building flood', () => {
     await openDemo(page, testInfo, '04-building-flood');
 
     test.slow();
-    // Wave has to propagate ~28m north from j=127 to the door at j≈72.
-    // Virtual pipes is dispersive — be generous with sim time.
-    await waitSimSeconds(page, 35);
+    // Wave propagates from south breach (~j=382) to big-house door (~j=172).
+    // Distance ≈ 8.75m, wave speed ≈ 3-5 m/s → ~2-3s. Allow generous 15s.
+    await waitSimSeconds(page, 15);
 
     const grid = await page.evaluate(() => window.__isenflow_app!.grid());
     const sc = await page.evaluate(() => window.__isenflow_app!.scratch());
@@ -51,7 +50,7 @@ test.describe.skip('demo 04 — building flood', () => {
     expect(doorMean, 'water has reached the door').toBeGreaterThan(0.001);
 
     // Wait longer so flood has time to enter through the door.
-    await waitSimSeconds(page, 70);
+    await waitSimSeconds(page, 30);
 
     // At least one cell INSIDE the building must have h > 0.05.
     const interiorWet = await page.evaluate(
