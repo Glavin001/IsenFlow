@@ -12,8 +12,11 @@ export type { BoxObstacle, DynamicBodyDescriptor } from './coupling/HeightfieldR
 export { BodyTracker } from './coupling/BodyTracker.js';
 export { ForceReadback } from './coupling/ForceReadback.js';
 export type { ChunkForce } from './coupling/ForceReadback.js';
-export { applyForcesToBodies } from './coupling/RapierBridge.js';
-export type { RapierBodyLike, RapierBodyMap, ApplyForcesOptions } from './coupling/RapierBridge.js';
+export { applyForcesToBodies, applyStabilizedForces, clampCoupledVelocities, createForceSmootherState } from './coupling/RapierBridge.js';
+export type { RapierBodyLike, RapierBodyFull, RapierBodyMap, ApplyForcesOptions, CoupledBodyInfo, ForceSmootherState } from './coupling/RapierBridge.js';
+export { computeCpuBuoyancy, computeVerticalDamping, estimateFootprintCells } from './coupling/CpuBuoyancy.js';
+export { computeImpact, applyImpact, spawnImpactSplash } from './coupling/ImpactDisplacement.js';
+export type { ImpactParams, ImpactResult, ImpactShape, ComputedImpact } from './coupling/ImpactDisplacement.js';
 
 export { WallChunk } from './destruction/WallChunk.js';
 export type { WallChunkInit } from './destruction/WallChunk.js';

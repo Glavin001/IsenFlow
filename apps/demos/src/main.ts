@@ -7,6 +7,7 @@ import buildingFlood from './demos/04-building-flood.js';
 import tsunami from './demos/05-tsunami-overtopping.js';
 import cascading from './demos/06-cascading-destruction.js';
 import splashes from './demos/07-splash-showcase.js';
+import impact from './demos/08-impact.js';
 
 const demos: Demo[] = [
   damBreak,
@@ -16,6 +17,7 @@ const demos: Demo[] = [
   tsunami,
   cascading,
   splashes,
+  impact,
 ];
 
 async function main() {
