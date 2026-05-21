@@ -145,18 +145,19 @@ export class WaterSurface {
   }
 
   /**
-   * Drive both the (every-N-frames) GPU readback and the per-frame
-   * temporal lerp toward the latest sampled target. Demos call this once
-   * per frame; the underlying readback still only fires every N frames.
+   * Drive the every-N-frames GPU readback. Demos call this once per frame;
+   * heavy work (smoothing, corner sampling, normal compute, geometry
+   * upload) happens once per successful readback, *not* every frame —
+   * doing it per-frame is enough to push real-GPU demos over their 60 FPS
+   * perf budget on a 384² grid.
    */
   update(): void {
+    if (this.reading) return;
     this.framesSinceRead++;
-    if (!this.reading && this.framesSinceRead >= this.opts.readbackInterval) {
-      this.framesSinceRead = 0;
-      this.reading = true;
-      this.kickReadback();
-    }
-    if (this.targetReady) this.applyTemporalLerp();
+    if (this.framesSinceRead < this.opts.readbackInterval) return;
+    this.framesSinceRead = 0;
+    this.reading = true;
+    this.kickReadback();
   }
 
   private kickReadback(): void {
@@ -188,12 +189,23 @@ export class WaterSurface {
           { positionsY: this.targetY, wetness: this.targetWetness },
         );
 
+        // 4) optional one-shot temporal blend with the previous frame's
+        //    sampled state. We do this *here* (not per-frame) so we still
+        //    smooth between readbacks but only pay the cost once per
+        //    readback. With temporalLerp=0 the blend is a no-op.
         if (!this.targetReady) {
-          // First valid frame: snap rather than lerp so we don't crawl up
-          // from -1000.
+          this.currentY.set(this.targetY);
+          this.currentWetness.set(this.targetWetness);
+        } else if (this.opts.temporalLerp < 1) {
+          lerpFieldInPlace(this.currentY, this.targetY, this.opts.temporalLerp);
+          lerpFieldInPlace(this.currentWetness, this.targetWetness, this.opts.temporalLerp);
+        } else {
           this.currentY.set(this.targetY);
           this.currentWetness.set(this.targetWetness);
         }
+
+        // 5) write Y + alpha into the BufferAttributes, recompute normals.
+        this.uploadGeometry();
         this.targetReady = true;
         this.hasFreshData = true;
         this.consecutiveErrors = 0;
@@ -214,11 +226,7 @@ export class WaterSurface {
       });
   }
 
-  private applyTemporalLerp(): void {
-    const a = this.opts.temporalLerp;
-    lerpFieldInPlace(this.currentY, this.targetY, a);
-    lerpFieldInPlace(this.currentWetness, this.targetWetness, a);
-
+  private uploadGeometry(): void {
     const g = this.solver.grid;
     const vw = g.width + 1;
     const vh = g.height + 1;
