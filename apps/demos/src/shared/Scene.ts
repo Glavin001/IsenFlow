@@ -17,10 +17,14 @@ import {
   HeightfieldRasterizer,
   SplashParticleSystem,
   ForceReadback,
-  applyForcesToBodies,
+  applyStabilizedForces,
+  clampCoupledVelocities,
+  createForceSmootherState,
   isWebGPUAvailable,
   type ChunkForce,
+  type CoupledBodyInfo,
   type DynamicBodyDescriptor,
+  type ForceSmootherState,
 } from 'isenflow';
 
 import { installTestBridge, updateTestBridge } from './testBridge.js';
@@ -34,6 +38,10 @@ export interface CoupledBody {
   halfExtentZ: number;
   /** Top-Y of the body relative to translation y. (Half-height.) */
   halfExtentY: number;
+  /** Reference water level (bed + depth) for CPU buoyancy. Set by demo. */
+  waterLevelRef: number;
+  /** Reference bed elevation for CPU buoyancy. Set by demo. */
+  bedLevelRef: number;
   /** Optional visual mesh, kept in sync with the body in `syncBodyMeshes`. */
   mesh?: THREE.Object3D;
   /** Optional debug name. */
@@ -86,6 +94,8 @@ export interface DemoContext {
     body: RAPIER.RigidBody;
     halfExtents: readonly [number, number, number];
     mesh?: THREE.Object3D;
+    waterLevelRef?: number;
+    bedLevelRef?: number;
   }): CoupledBody;
 }
 
@@ -212,7 +222,7 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
     lastSimRate: 0,
     simSpeed: 1,
     adapterInfo: buildAdapterInfoString(gpu.adapterInfo),
-    spawnCoupledBody({ name, body, halfExtents, mesh }) {
+    spawnCoupledBody({ name, body, halfExtents, mesh, waterLevelRef, bedLevelRef }) {
       if (nextChunkId >= solver.maxChunks) {
         throw new Error(`spawnCoupledBody: chunk id pool exhausted (>= ${solver.maxChunks})`);
       }
@@ -223,12 +233,16 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
         halfExtentX: halfExtents[0],
         halfExtentY: halfExtents[1],
         halfExtentZ: halfExtents[2],
+        waterLevelRef: waterLevelRef ?? 1.0,
+        bedLevelRef: bedLevelRef ?? 0,
         ...(mesh !== undefined ? { mesh } : {}),
         ...(name !== undefined ? { name } : {}),
       };
       coupledBodies.set(id, coupled);
       ctx.bodies.set(id, body);
       if (mesh && name && !mesh.name) mesh.name = name;
+      // Enable CPU buoyancy mode when bodies are present
+      solver.setCpuBuoyancyMode(true);
       return coupled;
     },
   };
@@ -336,6 +350,7 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
   let simAdvancedThisWindow = 0;
   let substepsThisWindow = 0;
   let firstError: Error | null = null;
+  const forceSmoother = createForceSmootherState();
 
   const dtSub = ctx.solver.opts.dt;
 
@@ -380,19 +395,31 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
       ctx.solver.accumulateForces(ringSlot ? { copyTo: ringSlot } : undefined);
       const forces = ctx.forceReadback.poll();
       if (forces) ctx.lastForces = forces;
-      if (ctx.lastForces) {
-        const bodyMap = new Map<number, RAPIER.RigidBody>();
-        for (const cb of ctx.coupledBodies.values()) bodyMap.set(cb.chunkId, cb.body);
-        applyForcesToBodies(bodyMap, ctx.lastForces);
+      let bodyInfos: Map<number, CoupledBodyInfo> | null = null;
+      if (ctx.coupledBodies.size > 0) {
+        bodyInfos = new Map<number, CoupledBodyInfo>();
+        for (const cb of ctx.coupledBodies.values()) {
+          bodyInfos.set(cb.chunkId, {
+            chunkId: cb.chunkId,
+            body: cb.body,
+            halfExtents: [cb.halfExtentX, cb.halfExtentY, cb.halfExtentZ],
+            waterLevelRef: cb.waterLevelRef,
+            bedLevelRef: cb.bedLevelRef,
+          });
+        }
+        applyStabilizedForces(bodyInfos, ctx.lastForces, forceSmoother, ctx.solver.grid.dx);
       }
 
-      // 5) Demo-specific update. Pass `simAdvance` (sim time advanced this
-      // frame) — NOT wallclock dt — so demo logic that accumulates time or
-      // schedules events uses sim seconds.
+      // 5) Demo-specific update.
       activeDemo.tick(ctx, simAdvance);
 
       // 6) Step Rapier AFTER all forces have been applied this frame.
       ctx.world.step();
+
+      // 6b) Clamp coupled body velocities AFTER Rapier step (safety net).
+      if (bodyInfos) {
+        clampCoupledVelocities(bodyInfos);
+      }
 
       // 7) Sync visual meshes to physics state.
       syncMeshes(ctx);

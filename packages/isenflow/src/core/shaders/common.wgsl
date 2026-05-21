@@ -21,7 +21,7 @@ struct SimParams {
   manningN: f32,
   originX:  f32,
   originZ:  f32,
-  _pad:     f32,
+  cpuBuoyancyMode: f32,
 };
 
 fn cell_idx(i: i32, j: i32, w: i32) -> u32 { return u32(j * w + i); }

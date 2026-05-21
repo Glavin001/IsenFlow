@@ -148,6 +148,12 @@ export class VirtualPipesSolver {
     return this.opts.maxChunks;
   }
 
+  /** Enable/disable CPU-side buoyancy mode (disables GPU buoyancy kernel). */
+  setCpuBuoyancyMode(enabled: boolean): void {
+    this.paramsView.setFloat32(44, enabled ? 1.0 : 0.0, true);
+    this.ctx.queue.writeBuffer(this.params, 0, this.paramsCpu);
+  }
+
   private uploadParams(): void {
     const dv = this.paramsView;
     dv.setUint32(0, this.grid.width, true);
@@ -163,7 +169,8 @@ export class VirtualPipesSolver {
     dv.setFloat32(32, this.opts.manningN, true);
     dv.setFloat32(36, this.grid.origin[0], true);  // originX
     dv.setFloat32(40, this.grid.origin[1], true);  // originZ
-    // 44: padding (already zero)
+    // 44: cpuBuoyancyMode (default 0 = GPU buoyancy; 1 = CPU buoyancy)
+    dv.setFloat32(44, 0, true);
     this.ctx.queue.writeBuffer(this.params, 0, this.paramsCpu);
   }
 

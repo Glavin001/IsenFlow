@@ -55,6 +55,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     new_h = mix(new_h, mean, 0.1);
   }
 
+  // Anti-oscillation filter: smooth only LOCAL EXTREMA (checkerboard spikes).
+  // A cell that is higher than ALL 4 neighbors or lower than ALL 4 is a
+  // numerical oscillation artifact.  Blend it toward the neighbor mean.
+  // This preserves smooth gradients, well-balanced states, and physical waves.
+  if ((bt == 0u || bt == 2u) &&
+      in_bounds(p + vec2<i32>(-1, 0), w, h) && in_bounds(p + vec2<i32>(1, 0), w, h) &&
+      in_bounds(p + vec2<i32>(0, -1), w, h) && in_bounds(p + vec2<i32>(0, 1), w, h)) {
+    let hL = h_at(&water, p + vec2<i32>(-1, 0), w, h);
+    let hR = h_at(&water, p + vec2<i32>( 1, 0), w, h);
+    let hD = h_at(&water, p + vec2<i32>( 0,-1), w, h);
+    let hU = h_at(&water, p + vec2<i32>( 0, 1), w, h);
+    let is_max = (new_h > hL) && (new_h > hR) && (new_h > hD) && (new_h > hU);
+    let is_min = (new_h < hL) && (new_h < hR) && (new_h < hD) && (new_h < hU);
+    if (is_max || is_min) {
+      let mean_h = (hL + hR + hD + hU) * 0.25;
+      // Only smooth when deviation is significant (>15% of local depth) to
+      // preserve well-balanced states over terrain bumps.
+      let deviation = abs(new_h - mean_h) / max(new_h + mean_h, 0.01);
+      if (deviation > 0.3) {
+        new_h = mix(new_h, mean_h, 0.1);
+      }
+    }
+  }
+
   water[idx * 2u + 0u] = new_h;
   water[idx * 2u + 1u] = h_old;
 

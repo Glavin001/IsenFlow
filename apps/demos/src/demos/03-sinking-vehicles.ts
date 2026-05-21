@@ -62,6 +62,8 @@ const demo: Demo = {
       body: woodBody,
       halfExtents: [halfSide, halfSide, halfSide],
       mesh: wood,
+      waterLevelRef: 1.5, // pond depth
+      bedLevelRef: 0,
     });
 
     // Concrete block (heavy): density 2400 kg/m³ — > 2× water, sinks.
@@ -85,6 +87,8 @@ const demo: Demo = {
       body: concBody,
       halfExtents: [halfSide, halfSide, halfSide],
       mesh: concrete,
+      waterLevelRef: 1.5,
+      bedLevelRef: 0,
     });
 
     const water = new WaterSurface(ctx.solver);

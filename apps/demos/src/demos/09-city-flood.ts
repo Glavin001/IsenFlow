@@ -580,10 +580,10 @@ const demo: Demo = {
       BoundaryType.Inflow,
       0,
     );
-    // Open boundary on east edge (drainage)
+    // Sea boundary on east edge (active drainage — pins depth to 0)
     ctx.solver.writeBoundaryRegionTarget(
       { x: W - 2, y: 0, w: 2, h: H },
-      BoundaryType.Open,
+      BoundaryType.Sea,
       0,
     );
 

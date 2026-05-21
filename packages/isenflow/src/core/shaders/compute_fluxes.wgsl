@@ -30,10 +30,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let p_D = p + vec2<i32>(0, -1);
   let p_U = p + vec2<i32>(0, 1);
 
-  let eta_L = bed_total_at(&bed, p_L, w, h) + h_at(&water, p_L, w, h);
-  let eta_R = bed_total_at(&bed, p_R, w, h) + h_at(&water, p_R, w, h);
-  let eta_D = bed_total_at(&bed, p_D, w, h) + h_at(&water, p_D, w, h);
-  let eta_U = bed_total_at(&bed, p_U, w, h) + h_at(&water, p_U, w, h);
+  // For Open boundaries (type 2) at grid edges, out-of-bounds neighbors
+  // would get bed_total=1e6 (infinite wall), blocking all outflow.
+  // Use transmissive condition: set neighbor eta = eta_self so existing
+  // flux momentum carries water out of the domain.
+  let bt = boundary[idx];
+  let is_open = (bt == 2u);
+
+  let eta_L = select(bed_total_at(&bed, p_L, w, h) + h_at(&water, p_L, w, h), eta_self, is_open && !in_bounds(p_L, w, h));
+  let eta_R = select(bed_total_at(&bed, p_R, w, h) + h_at(&water, p_R, w, h), eta_self, is_open && !in_bounds(p_R, w, h));
+  let eta_D = select(bed_total_at(&bed, p_D, w, h) + h_at(&water, p_D, w, h), eta_self, is_open && !in_bounds(p_D, w, h));
+  let eta_U = select(bed_total_at(&bed, p_U, w, h) + h_at(&water, p_U, w, h), eta_self, is_open && !in_bounds(p_U, w, h));
 
   let dh_L = eta_self - eta_L;
   let dh_R = eta_self - eta_R;
@@ -87,13 +94,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     ud.y = ud.y / (1.0 + params.dt * cf_U * speed_U);
   }
 
+  // CFL safety clamp: cap each flux at the volume-rate that would move one
+  // cell-width of water per timestep through the face.  This only activates
+  // when depths are extreme (h >> dx²/(g·dt²) ≈ 10 m at current params) and
+  // prevents the checkerboard blow-up that the K scaling alone can't stop
+  // (K limits outflow per cell; this limits per-face rate).
+  let cfl_cap = params.dx * params.dx * params.dx / params.dt;
+  lr.x = min(lr.x, cfl_cap);
+  lr.y = min(lr.y, cfl_cap);
+  ud.x = min(ud.x, cfl_cap);
+  ud.y = min(ud.y, cfl_cap);
+
   let total_out = (lr.x + lr.y + ud.x + ud.y) * params.dt;
   let volume_available = max(0.0, h_self) * params.dx * params.dx;
   let K = select(min(1.0, volume_available / max(total_out, 1e-9)), 0.0, h_self <= 0.0);
   lr = lr * K;
   ud = ud * K;
-
-  let bt = boundary[idx];
   if (bt == 1u) {
     lr = vec2<f32>(0.0, 0.0);
     ud = vec2<f32>(0.0, 0.0);

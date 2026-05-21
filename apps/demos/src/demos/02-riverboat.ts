@@ -4,6 +4,8 @@ import { ownByDemo } from '../shared/Scene.js';
 import { WaterSurface } from '../shared/Water.js';
 import { BoundaryType } from 'isenflow';
 
+const WATER_DEPTH = 0.8;
+
 const demo: Demo = {
   id: '02-riverboat',
   label: 'B. Riverboat',
@@ -11,42 +13,38 @@ const demo: Demo = {
     'A river flows along the X axis with constant inflow at the west edge. A wooden crate floats and is carried downstream by hydrodynamic drag (real water→body coupling).',
   setup(ctx) {
     const g = ctx.solver.grid;
-    // Pre-fill the channel uniformly with shallow water.
-    const initWater = new Float32Array(g.width * g.height).fill(0.6);
+    const bankCells = Math.max(8, Math.round(g.height * 0.12));
+
+    // Flat bed (no slope) — flow is driven purely by boundary head difference.
+    // Fill the channel with water; banks stay dry (bed=2m >> water depth).
+    const initWater = new Float32Array(g.width * g.height);
+    for (let j = bankCells; j < g.height - bankCells; j++) {
+      for (let i = 0; i < g.width; i++) {
+        initWater[j * g.width + i] = WATER_DEPTH;
+      }
+    }
     ctx.solver.writeWaterFull(initWater);
 
-    // Banks: raise bed at top/bottom rows. Use ~12 % of grid height each
-    // side so the channel scales with whatever world size we configure.
-    const bankCells = Math.max(8, Math.round(g.height * 0.12));
+    // Banks: raise bed at top/bottom rows.
     const bank = new Float32Array(g.width).fill(2);
     for (let j = 0; j < bankCells; j++) ctx.solver.writeBedRegion({ x: 0, y: j, w: g.width, h: 1 }, bank);
     for (let j = g.height - bankCells; j < g.height; j++) ctx.solver.writeBedRegion({ x: 0, y: j, w: g.width, h: 1 }, bank);
 
-    // ~0.3% bed slope east-to-west so Manning friction + head gradient
-    // produce a steady current ≈ 0.5 m/s mid-channel.
-    const slope = 0.003;
-    const bedSlope = new Float32Array(g.width * g.height);
-    for (let j = bankCells; j < g.height - bankCells; j++) {
-      for (let i = 0; i < g.width; i++) {
-        bedSlope[j * g.width + i] = slope * (g.width - i) * g.dx;
-      }
-    }
-    ctx.solver.writeBedRegion({ x: 0, y: bankCells, w: g.width, h: g.height - 2 * bankCells }, bedSlope.subarray(bankCells * g.width, (g.height - bankCells) * g.width));
-
-    // Boundary: Inflow on west edge, Open on east edge
+    // Boundary: Sea at both edges with a small head difference drives steady flow.
+    // Open boundary doesn't truly let water exit (out-of-bounds bed=1e6),
+    // so we use Sea at a lower level instead.
     ctx.solver.writeBoundaryRegionTarget(
-      { x: 0, y: 0, w: 1, h: g.height },
-      BoundaryType.Inflow,
-      1.2,
+      { x: 0, y: bankCells, w: 1, h: g.height - 2 * bankCells },
+      BoundaryType.Sea,
+      WATER_DEPTH + 0.02,
     );
     ctx.solver.writeBoundaryRegionTarget(
-      { x: g.width - 1, y: 0, w: 1, h: g.height },
-      BoundaryType.Open,
-      0,
+      { x: g.width - 1, y: bankCells, w: 1, h: g.height - 2 * bankCells },
+      BoundaryType.Sea,
+      WATER_DEPTH - 0.02,
     );
 
-    // Solid river bed: a wide static collider at y=0 so dynamic bodies cannot
-    // tunnel through if the GPU buoyancy coupling momentarily misbehaves.
+    // Solid river bed collider so dynamic bodies cannot tunnel through.
     const worldW = g.width * g.dx;
     const bed = ctx.world.createRigidBody(ctx.rapier.RigidBodyDesc.fixed().setTranslation(0, -0.05, 0));
     ctx.world.createCollider(ctx.rapier.ColliderDesc.cuboid(worldW / 2, 0.05, worldW / 2), bed);
@@ -58,14 +56,15 @@ const demo: Demo = {
     const crate = ownByDemo(new THREE.Mesh(crateGeo, crateMat));
     crate.name = 'crate';
     const startX = g.origin[0] + g.width * g.dx * 0.2;
-    crate.position.set(startX, 0.3, 0);
+    const spawnY = WATER_DEPTH + 0.1;
+    crate.position.set(startX, spawnY, 0);
     ctx.scene.add(crate);
 
     const body = ctx.world.createRigidBody(
       ctx.rapier.RigidBodyDesc.dynamic()
-        .setTranslation(startX, 0.3, 0)
+        .setTranslation(startX, spawnY, 0)
         .setLinearDamping(2.0)
-        .setAngularDamping(1.0),
+        .setAngularDamping(5.0),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfX, halfY, halfZ).setDensity(400),
@@ -77,6 +76,8 @@ const demo: Demo = {
       body,
       halfExtents: [halfX, halfY, halfZ],
       mesh: crate,
+      waterLevelRef: WATER_DEPTH,
+      bedLevelRef: 0,
     });
 
     const water = new WaterSurface(ctx.solver);
@@ -85,8 +86,6 @@ const demo: Demo = {
   },
   tick(ctx) {
     (ctx.scratch.water as WaterSurface).update();
-    // Inflow/Open boundaries handle the river flow via boundaryTargetH —
-    // no per-frame writeWaterRegion needed.
   },
 };
 

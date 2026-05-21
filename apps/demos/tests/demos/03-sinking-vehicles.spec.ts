@@ -7,15 +7,8 @@ import {
   assertPerformance,
 } from '../_setup.js';
 
-// TODO(buoyancy): Same root cause as demo 02 — the GPU coupling's readback
-// latency lets stale forces re-apply for several frames, and the per-cell
-// buoyancy in `accumulate_forces.wgsl` over-counts cells in a body's footprint.
-// In practice that throws the concrete block UP to y≈130m and the wood block
-// through any floor we add. Re-enable once buoyancy/coupling is stabilised
-// (likely a CPU-side smoothing pass or synchronous force read for the body's
-// own chunkId).
 test.describe('demo 03 — sinking vehicles', () => {
-  test.skip('wood floats; concrete sinks (real GPU buoyancy)', async ({
+  test('wood floats; concrete sinks (real GPU buoyancy)', async ({
     page,
     consoleErrors,
     pageErrors,

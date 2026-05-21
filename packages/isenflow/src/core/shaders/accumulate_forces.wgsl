@@ -66,29 +66,35 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let Fx_hyd = 0.5 * RHO * G * (hL * hL - hR * hR) * params.dx;
   let Fz_hyd = 0.5 * RHO * G * (hD * hD - hU * hU) * params.dx;
 
-  // ----------------- BUOYANCY (using body COM ± halfY) -----------------
+  // Shared state for buoyancy and torque computation.
   let bed_terrain = bed[idx * 2u + 0u];
   let com         = chunkCOMs[min(cid, 255u)].xyz;
-  let halfY       = chunkCOMs[min(cid, 255u)].w;
-  let body_top    = com.y + halfY;
-  let body_bot    = com.y - halfY;
-  let waterline   = bed_terrain + h_self;
-  let top_in_water = min(waterline, body_top);
-  let bot_in_water = max(bed_terrain, body_bot);
-  let submerged_h = max(0.0, top_in_water - bot_in_water);
-  let F_buoy = RHO * G * params.dx * params.dx * submerged_h;
 
-  // ----------------- VERTICAL DAMPING -----------------
-  // Damps vertical motion when submerged. submerged_fraction in [0, 1].
-  var submerged_frac: f32 = 0.0;
-  let body_h_total = max(1e-3, 2.0 * halfY);
-  if (submerged_h > 0.0) {
-    submerged_frac = clamp(submerged_h / body_h_total, 0.0, 1.0);
+  // ----------------- BUOYANCY (using body COM ± halfY) -----------------
+  // When cpuBuoyancyMode is enabled, buoyancy + vertical damping are computed
+  // on the CPU with zero latency to avoid readback-induced oscillation.
+  var Fy: f32 = 0.0;
+  if (params.cpuBuoyancyMode < 0.5) {
+    let halfY_b     = chunkCOMs[min(cid, 255u)].w;
+    let body_top    = com.y + halfY_b;
+    let body_bot    = com.y - halfY_b;
+    let waterline   = bed_terrain + h_self;
+    let top_in_water = min(waterline, body_top);
+    let bot_in_water = max(bed_terrain, body_bot);
+    let submerged_h = max(0.0, top_in_water - bot_in_water);
+    let F_buoy = RHO * G * params.dx * params.dx * submerged_h;
+
+    // Vertical damping: damps vertical motion when submerged.
+    var submerged_frac: f32 = 0.0;
+    let body_h_total = max(1e-3, 2.0 * halfY_b);
+    if (submerged_h > 0.0) {
+      submerged_frac = clamp(submerged_h / body_h_total, 0.0, 1.0);
+    }
+    let F_vdamp = -KV * submerged_frac * cv.y * params.dx * params.dx;
+    Fy = F_buoy + F_vdamp;
   }
-  let F_vdamp = -KV * submerged_frac * cv.y * params.dx * params.dx;
 
   let Fx = Fx_drag + Fx_hyd;
-  let Fy = F_buoy  + F_vdamp;
   let Fz = Fz_drag + Fz_hyd;
 
   let cellWorld = vec3<f32>(

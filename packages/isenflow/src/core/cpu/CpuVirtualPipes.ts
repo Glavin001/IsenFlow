@@ -100,10 +100,13 @@ export function cpuComputeFluxes(state: CpuPipesState, params: CpuPipesParams): 
       const hSelf = water[ci * 2]!;
       const etaSelf = bSelf + hSelf;
 
-      const etaL = bedTotalAt(bed, i - 1, j, W, H) + hAt(water, i - 1, j, W, H);
-      const etaR = bedTotalAt(bed, i + 1, j, W, H) + hAt(water, i + 1, j, W, H);
-      const etaD = bedTotalAt(bed, i, j - 1, W, H) + hAt(water, i, j - 1, W, H);
-      const etaU = bedTotalAt(bed, i, j + 1, W, H) + hAt(water, i, j + 1, W, H);
+      // Open boundary (type 2): use transmissive condition at grid edges
+      const bt = boundary[ci]!;
+      const isOpen = bt === 2;
+      const etaL = (isOpen && !inBounds(i - 1, j, W, H)) ? etaSelf : bedTotalAt(bed, i - 1, j, W, H) + hAt(water, i - 1, j, W, H);
+      const etaR = (isOpen && !inBounds(i + 1, j, W, H)) ? etaSelf : bedTotalAt(bed, i + 1, j, W, H) + hAt(water, i + 1, j, W, H);
+      const etaD = (isOpen && !inBounds(i, j - 1, W, H)) ? etaSelf : bedTotalAt(bed, i, j - 1, W, H) + hAt(water, i, j - 1, W, H);
+      const etaU = (isOpen && !inBounds(i, j + 1, W, H)) ? etaSelf : bedTotalAt(bed, i, j + 1, W, H) + hAt(water, i, j + 1, W, H);
 
       const dhL = etaSelf - etaL;
       const dhR = etaSelf - etaR;
@@ -142,6 +145,13 @@ export function cpuComputeFluxes(state: CpuPipesState, params: CpuPipesParams): 
         fU = applyManning(fU, hpipeU);
       }
 
+      // CFL safety clamp: cap each flux at dx³/dt
+      const cflCap = dx * dx * dx / dt;
+      fL = Math.min(fL, cflCap);
+      fR = Math.min(fR, cflCap);
+      fD = Math.min(fD, cflCap);
+      fU = Math.min(fU, cflCap);
+
       // Outflow scaling to prevent over-drain
       const totalOut = (fL + fR + fD + fU) * dt;
       const volumeAvailable = Math.max(0, hSelf) * dx * dx;
@@ -150,9 +160,6 @@ export function cpuComputeFluxes(state: CpuPipesState, params: CpuPipesParams): 
       fR *= K;
       fD *= K;
       fU *= K;
-
-      // Boundary: Closed = zero flux
-      const bt = boundary[ci]!;
       if (bt === 1) {
         fL = 0; fR = 0; fD = 0; fU = 0;
       }
@@ -220,6 +227,25 @@ export function cpuUpdateWater(state: CpuPipesState, params: CpuPipesParams): vo
                       hAt(water, i, j - 1, W, H) +
                       hAt(water, i, j + 1, W, H)) * 0.25;
         newH = newH + 0.1 * (mean - newH); // mix(newH, mean, 0.1)
+      }
+
+      // Anti-oscillation filter: smooth only local extrema (checkerboard spikes)
+      if ((bt === 0 || bt === 2) &&
+          inBounds(i - 1, j, W, H) && inBounds(i + 1, j, W, H) &&
+          inBounds(i, j - 1, W, H) && inBounds(i, j + 1, W, H)) {
+        const hL = hAt(water, i - 1, j, W, H);
+        const hR = hAt(water, i + 1, j, W, H);
+        const hD = hAt(water, i, j - 1, W, H);
+        const hU = hAt(water, i, j + 1, W, H);
+        const isMax = newH > hL && newH > hR && newH > hD && newH > hU;
+        const isMin = newH < hL && newH < hR && newH < hD && newH < hU;
+        if (isMax || isMin) {
+          const meanH = (hL + hR + hD + hU) * 0.25;
+          const deviation = Math.abs(newH - meanH) / Math.max(newH + meanH, 0.01);
+          if (deviation > 0.3) {
+            newH = newH + 0.1 * (meanH - newH);
+          }
+        }
       }
 
       water[ci * 2] = newH;
