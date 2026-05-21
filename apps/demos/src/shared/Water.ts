@@ -21,6 +21,10 @@ export class WaterSurface {
   private lastErrorMessage = '';
   /** True once the first successful readback has populated vertex Y values. */
   hasFreshData = false;
+  /** Raw GPU readback from last successful update (interleaved [h, h_prev]). */
+  lastWaterData: Float32Array | null = null;
+  /** Raw GPU readback from last successful update (interleaved [terrain, total]). */
+  lastBedData: Float32Array | null = null;
 
   constructor(private readonly solver: VirtualPipesSolver) {
     const g = solver.grid;
@@ -54,6 +58,8 @@ export class WaterSurface {
     this.reading = true;
     Promise.all([this.solver.readWater(), this.solver.readBed()])
       .then(([w, b]) => {
+        this.lastWaterData = w;
+        this.lastBedData = b;
         const g = this.solver.grid;
         const pos = this.positions;
         const nx = g.width + 1;

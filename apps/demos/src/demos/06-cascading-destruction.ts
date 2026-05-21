@@ -4,6 +4,9 @@ import { ownByDemo } from '../shared/Scene.js';
 import { WaterSurface } from '../shared/Water.js';
 import { createStress, tickStress, FractureScheduler, BoundaryType } from 'isenflow';
 
+/** Rho (kg/m^3) * g (m/s^2) * 0.5 — hydrostatic pressure constant. */
+const HALF_RHO_G = 0.5 * 1000 * 9.81;
+
 interface ChunkEntry {
   index: number;
   cells: { x: number; y: number; w: number; h: number };
@@ -77,18 +80,22 @@ const demo: Demo = {
       tide,
     );
 
-    const STRESS_DT = 1 / 60;
-    const stressTicks = Math.max(1, Math.round(dt / STRESS_DT));
     const chunks = ctx.scratch.chunks as ChunkEntry[];
     const scheduler = ctx.scratch.scheduler as FractureScheduler<ChunkEntry>;
+    const wData = (ctx.scratch.water as WaterSurface).lastWaterData;
     for (const c of chunks) {
       if (!c.mesh.visible) continue;
-      const F = 0.5 * 1000 * 9.81 * tide * tide * g.height * g.dx;
-      for (let s = 0; s < stressTicks; s++) {
-        if (tickStress(c.stress, F, STRESS_DT)) {
-          scheduler.request(c, 1.0 / Math.max(1, c.index + 1));
-          break;
+      let F = 0;
+      if (wData) {
+        // Sample actual water depth one column upstream of the wall
+        const upCol = Math.max(0, c.cells.x - 1);
+        for (let j = 0; j < g.height; j++) {
+          const h = wData[(j * g.width + upCol) * 2] ?? 0;
+          F += HALF_RHO_G * h * h * g.dx;
         }
+      }
+      if (tickStress(c.stress, F, dt)) {
+        scheduler.request(c, 1.0 / Math.max(1, c.index + 1));
       }
     }
     const drained = scheduler.drainFrame();
