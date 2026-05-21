@@ -62,6 +62,18 @@ export interface AppBridge {
   sceneObject(name: string): { exists: boolean; visible: boolean } | null;
   /** Snapshot of the demo's `scratch` map (only primitive / plain values). */
   scratch(): Record<string, unknown>;
+  /**
+   * Largest |ΔY| between adjacent wet vertices of the water mesh, in metres.
+   * Used to assert the rendered surface has no shoreline cliffs. Returns
+   * null if the active demo isn't using a `WaterSurface`.
+   */
+  waterMaxWetSpike(): number | null;
+  /**
+   * Largest 1D 2nd-difference along rows/columns of the wet portion of the
+   * water mesh — a sensitive checkerboard / "sharp ripple" detector.
+   * Returns null if no WaterSurface is active.
+   */
+  waterMaxRoughness(): number | null;
 }
 
 declare global {
@@ -245,6 +257,44 @@ export function installTestBridge(ctx: DemoContext): void {
       return { exists: true, visible: obj.visible };
     },
     scratch: () => safeScratch(),
+    waterMaxWetSpike: () => {
+      const w = ctx.scratch.water as { maxWetSpike?: number } | undefined;
+      return w && typeof w.maxWetSpike === 'number' ? w.maxWetSpike : null;
+    },
+    waterMaxRoughness: () => {
+      const w = ctx.scratch.water as
+        | {
+            mesh?: { geometry?: { attributes?: Record<string, { array?: Float32Array }> } };
+            currentWetness?: Float32Array;
+          }
+        | undefined;
+      // Pull from the mesh's position attribute directly so this works
+      // regardless of the WaterSurface internal layout.
+      if (!w || !w.mesh?.geometry?.attributes) return null;
+      const pos = w.mesh.geometry.attributes.position?.array;
+      if (!pos) return null;
+      const g = ctx.solver.grid;
+      const vw = g.width + 1;
+      const vh = g.height + 1;
+      let maxAbs2nd = 0;
+      // 2nd-difference along rows (skip 1-cell border).
+      for (let j = 1; j < vh - 1; j++) {
+        for (let i = 1; i < vw - 1; i++) {
+          const vi = j * vw + i;
+          const yC = pos[vi * 3 + 1]!;
+          // Skip the legacy parked-below sentinel range (very large neg Y).
+          if (yC < -50) continue;
+          const yL = pos[(vi - 1) * 3 + 1]!;
+          const yR = pos[(vi + 1) * 3 + 1]!;
+          const yD = pos[(vi - vw) * 3 + 1]!;
+          const yU = pos[(vi + vw) * 3 + 1]!;
+          if (yL < -50 || yR < -50 || yD < -50 || yU < -50) continue;
+          const lap = Math.abs(yL + yR + yD + yU - 4 * yC);
+          if (lap > maxAbs2nd) maxAbs2nd = lap;
+        }
+      }
+      return maxAbs2nd;
+    },
   };
 
   w.__isenflow_app = bridge;

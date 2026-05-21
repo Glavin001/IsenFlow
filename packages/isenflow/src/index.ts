@@ -34,6 +34,15 @@ export { createWaterMesh } from './render/WaterMesh.js';
 export type { WaterMeshOptions } from './render/WaterMesh.js';
 export { createWaterMaterialTSL } from './render/WaterMaterial.js';
 export type { WaterMaterialDeps } from './render/WaterMaterial.js';
+export {
+  computeWaterVertices,
+  computeWaterNormals,
+  smoothScalarField,
+  extractWaterDepth,
+  extractBedTotal,
+  lerpFieldInPlace,
+} from './render/waterSurfaceMath.js';
+export type { WaterSurfaceOptions, VertexSampleResult } from './render/waterSurfaceMath.js';
 
 // Math re-exports for convenience (also exported standalone via "isenflow/math").
 export * from './math.js';
