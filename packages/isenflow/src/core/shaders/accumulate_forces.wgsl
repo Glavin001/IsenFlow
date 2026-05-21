@@ -92,9 +92,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let Fz = Fz_drag + Fz_hyd;
 
   let cellWorld = vec3<f32>(
-    (f32(p.x) + 0.5) * params.dx,
+    params.originX + (f32(p.x) + 0.5) * params.dx,
     bed_terrain,
-    (f32(p.y) + 0.5) * params.dx,
+    params.originZ + (f32(p.y) + 0.5) * params.dx,
   );
   let r = cellWorld - com;
   let tau = cross(r, vec3<f32>(Fx, Fy, Fz));

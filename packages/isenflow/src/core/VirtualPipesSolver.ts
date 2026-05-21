@@ -7,17 +7,18 @@
  * avoids the per-stage storage-texture cap (4 per stage on most adapters).
  *
  * Buffer layout (one buffer per logical field, row-major idx = j*width + i):
- *   bed      : 2 f32 per cell  (terrain, total)
- *   water    : 2 f32 per cell  (h, h_prev)
- *   fluxLR   : 2 f32 per cell  (left, right)
- *   fluxUD   : 2 f32 per cell  (down, up)
- *   velocity : 2 f32 per cell  (u, v)
- *   chunkId  : 1 u32 per cell
- *   chunkVel : 4 f32 per cell  (vx, vy, vz, speed)
- *   boundary : 1 u32 per cell
- *   prevBed  : 1 f32 per cell
- *   hDelta   : 1 i32 per cell  (atomic, fixed-point)
- *   forceAccum: 6 i32 per chunk (fx, fy, fz, tx, ty, tz; atomic, fixed-point)
+ *   bed            : 2 f32 per cell  (terrain, total)
+ *   water          : 2 f32 per cell  (h, h_prev)
+ *   fluxLR         : 2 f32 per cell  (left, right)
+ *   fluxUD         : 2 f32 per cell  (down, up)
+ *   velocity       : 2 f32 per cell  (u, v)
+ *   chunkId        : 1 u32 per cell
+ *   chunkVel       : 4 f32 per cell  (vx, vy, vz, speed)
+ *   boundary       : 1 u32 per cell
+ *   boundaryTargetH: 1 f32 per cell  (target depth for Inflow/Sea)
+ *   prevBed        : 1 f32 per cell
+ *   hDelta         : 1 i32 per cell  (atomic, fixed-point)
+ *   forceAccum     : 6 i32 per chunk (fx, fy, fz, tx, ty, tz; atomic, fixed-point)
  */
 import type { GPUContext } from './GPUContext.js';
 import type { SimulationGrid } from './SimulationGrid.js';
@@ -27,18 +28,25 @@ export interface SolverOptions {
   readonly dt: number;
   readonly substepsPerFrame: number;
   readonly gravity?: number;
+  /**
+   * Fraction of flux retained per second (Dagenais 2018 ω, default 0.5).
+   * Uploaded to the GPU as `pow(damping, dt)` so decay is dt-independent.
+   */
   readonly damping?: number;
   readonly maxChunks?: number;
   /** Effective cross-section of a virtual pipe; default `dx²`. */
   readonly pipeArea?: number;
   /** Effective length of a virtual pipe; default `dx`. */
   readonly pipeLen?: number;
+  /** Manning roughness coefficient (default 0). Set to 0.03 for natural channels. */
+  readonly manningN?: number;
 }
 
 const DEFAULT_OPTS: Required<Omit<SolverOptions, 'dt' | 'substepsPerFrame' | 'pipeArea' | 'pipeLen'>> = {
   gravity: 9.81,
-  damping: 0.98,
+  damping: 0.5,
   maxChunks: 256,
+  manningN: 0,
 };
 
 const STORAGE_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
@@ -56,6 +64,7 @@ export class VirtualPipesSolver {
   readonly chunkId: GPUBuffer;
   readonly chunkVel: GPUBuffer;
   readonly boundary: GPUBuffer;
+  readonly boundaryTargetH: GPUBuffer;
   readonly prevBed: GPUBuffer;
   readonly hDelta: GPUBuffer;
   readonly forceAccum: GPUBuffer;
@@ -73,6 +82,9 @@ export class VirtualPipesSolver {
   readonly terrainMirror: Float32Array;
 
   private pipelines: Record<string, GPUComputePipeline> = {};
+
+  // Cached bind groups (P2 perf fix — never re-created per frame)
+  private cachedBindGroups: Record<string, GPUBindGroup> = {};
 
   constructor(ctx: GPUContext, grid: SimulationGrid, opts: SolverOptions) {
     this.ctx = ctx;
@@ -94,15 +106,12 @@ export class VirtualPipesSolver {
     this.chunkId   = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.chunkId' });
     this.chunkVel  = dev.createBuffer({ size: cells * 4 * 4, usage: STORAGE_USAGE, label: 'isenflow.chunkVel' });
     this.boundary  = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.boundary' });
+    this.boundaryTargetH = dev.createBuffer({ size: cells * 4, usage: STORAGE_USAGE, label: 'isenflow.boundaryTargetH' });
     this.prevBed   = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.prevBed' });
     this.hDelta    = dev.createBuffer({ size: cells * 4,     usage: STORAGE_USAGE, label: 'isenflow.hDelta' });
 
     const chunkBytes = this.opts.maxChunks * 6 * 4;
     this.forceAccum = dev.createBuffer({ size: chunkBytes, usage: STORAGE_USAGE, label: 'isenflow.forceAccum' });
-    // The accumulate_forces shader declares `chunkCOMs` as a fixed-size
-    // `array<vec4<f32>, 256>` uniform (4096 bytes). WebGPU requires the
-    // bound buffer to be at least that large even if `maxChunks < 256`,
-    // so we always size up to 256 entries here.
     this.chunkCOMs  = dev.createBuffer({
       size: Math.max(256, this.opts.maxChunks) * 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -111,7 +120,8 @@ export class VirtualPipesSolver {
 
     this.terrainMirror = new Float32Array(cells);
 
-    this.paramsCpu = new ArrayBuffer(32);
+    // SimParams: 8 original fields (32 bytes) + manningN + originX + originZ + pad = 48 bytes
+    this.paramsCpu = new ArrayBuffer(48);
     this.paramsView = new DataView(this.paramsCpu);
     this.params = dev.createBuffer({
       size: this.paramsCpu.byteLength,
@@ -121,6 +131,7 @@ export class VirtualPipesSolver {
     this.uploadParams();
     this.seedInitial();
     this.buildPipelines();
+    this.buildBindGroups();
   }
 
   /** Bytes-per-chunk in `forceAccum` (6 × i32). Useful for force readback ring sizing. */
@@ -144,9 +155,15 @@ export class VirtualPipesSolver {
     dv.setFloat32(8, this.grid.dx, true);
     dv.setFloat32(12, this.opts.dt, true);
     dv.setFloat32(16, this.opts.gravity, true);
-    dv.setFloat32(20, this.opts.damping, true);
+    // Dagenais 2018 eq. (1): upload ζ = pow(ω, dt) for dt-independent damping
+    dv.setFloat32(20, Math.pow(this.opts.damping, this.opts.dt), true);
     dv.setFloat32(24, this.opts.pipeArea, true);
     dv.setFloat32(28, this.opts.pipeLen, true);
+    // Extended fields
+    dv.setFloat32(32, this.opts.manningN, true);
+    dv.setFloat32(36, this.grid.origin[0], true);  // originX
+    dv.setFloat32(40, this.grid.origin[1], true);  // originZ
+    // 44: padding (already zero)
     this.ctx.queue.writeBuffer(this.params, 0, this.paramsCpu);
   }
 
@@ -191,6 +208,67 @@ export class VirtualPipesSolver {
     this.pipelines.zeroForces = make('zeroForces', ShaderSource.zeroForces);
   }
 
+  /** P2 perf fix: cache bind groups at construction, reuse every frame. */
+  private buildBindGroups(): void {
+    const dev = this.ctx.device;
+    const bg = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[]) =>
+      dev.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+
+    this.cachedBindGroups.fluxes = bg(this.pipelines.fluxes!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.bed } },
+      { binding: 2, resource: { buffer: this.water } },
+      { binding: 3, resource: { buffer: this.fluxLR } },
+      { binding: 4, resource: { buffer: this.fluxUD } },
+      { binding: 5, resource: { buffer: this.boundary } },
+    ]);
+
+    this.cachedBindGroups.update = bg(this.pipelines.update!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.water } },
+      { binding: 2, resource: { buffer: this.fluxLR } },
+      { binding: 3, resource: { buffer: this.fluxUD } },
+      { binding: 4, resource: { buffer: this.velocity } },
+      { binding: 5, resource: { buffer: this.boundary } },
+      { binding: 6, resource: { buffer: this.boundaryTargetH } },
+    ]);
+
+    this.cachedBindGroups.displace = bg(this.pipelines.displace!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.bed } },
+      { binding: 2, resource: { buffer: this.water } },
+      { binding: 3, resource: { buffer: this.prevBed } },
+      { binding: 4, resource: { buffer: this.hDelta } },
+    ]);
+
+    this.cachedBindGroups.foldDelta = bg(this.pipelines.foldDelta!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.water } },
+      { binding: 2, resource: { buffer: this.hDelta } },
+    ]);
+
+    this.cachedBindGroups.snapshot = bg(this.pipelines.snapshot!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.bed } },
+      { binding: 2, resource: { buffer: this.prevBed } },
+    ]);
+
+    this.cachedBindGroups.accumulate = bg(this.pipelines.accumulate!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.bed } },
+      { binding: 2, resource: { buffer: this.water } },
+      { binding: 3, resource: { buffer: this.velocity } },
+      { binding: 4, resource: { buffer: this.chunkId } },
+      { binding: 5, resource: { buffer: this.chunkVel } },
+      { binding: 6, resource: { buffer: this.forceAccum } },
+      { binding: 7, resource: { buffer: this.chunkCOMs } },
+    ]);
+
+    this.cachedBindGroups.zeroForces = bg(this.pipelines.zeroForces!, [
+      { binding: 0, resource: { buffer: this.forceAccum } },
+    ]);
+  }
+
   step(): void {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.step' });
     const dx = Math.ceil(this.grid.width / 8);
@@ -199,13 +277,13 @@ export class VirtualPipesSolver {
     for (let s = 0; s < this.opts.substepsPerFrame; s++) {
       const passF = encoder.beginComputePass({ label: 'fluxes' });
       passF.setPipeline(this.pipelines.fluxes!);
-      passF.setBindGroup(0, this.bindFluxes(this.pipelines.fluxes!));
+      passF.setBindGroup(0, this.cachedBindGroups.fluxes!);
       passF.dispatchWorkgroups(dx, dy, 1);
       passF.end();
 
       const passU = encoder.beginComputePass({ label: 'update' });
       passU.setPipeline(this.pipelines.update!);
-      passU.setBindGroup(0, this.bindUpdate(this.pipelines.update!));
+      passU.setBindGroup(0, this.cachedBindGroups.update!);
       passU.dispatchWorkgroups(dx, dy, 1);
       passU.end();
     }
@@ -219,19 +297,19 @@ export class VirtualPipesSolver {
 
     const passD = encoder.beginComputePass({ label: 'displace' });
     passD.setPipeline(this.pipelines.displace!);
-    passD.setBindGroup(0, this.bindDisplace(this.pipelines.displace!));
+    passD.setBindGroup(0, this.cachedBindGroups.displace!);
     passD.dispatchWorkgroups(dx, dy, 1);
     passD.end();
 
     const passF = encoder.beginComputePass({ label: 'foldDelta' });
     passF.setPipeline(this.pipelines.foldDelta!);
-    passF.setBindGroup(0, this.bindFoldDelta(this.pipelines.foldDelta!));
+    passF.setBindGroup(0, this.cachedBindGroups.foldDelta!);
     passF.dispatchWorkgroups(dx, dy, 1);
     passF.end();
 
     const passS = encoder.beginComputePass({ label: 'snapshot' });
     passS.setPipeline(this.pipelines.snapshot!);
-    passS.setBindGroup(0, this.bindSnapshot(this.pipelines.snapshot!));
+    passS.setBindGroup(0, this.cachedBindGroups.snapshot!);
     passS.dispatchWorkgroups(dx, dy, 1);
     passS.end();
     this.ctx.queue.submit([encoder.finish()]);
@@ -248,7 +326,7 @@ export class VirtualPipesSolver {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.zeroForces' });
     const pass = encoder.beginComputePass({ label: 'zeroForces' });
     pass.setPipeline(this.pipelines.zeroForces!);
-    pass.setBindGroup(0, this.bindZeroForces(this.pipelines.zeroForces!));
+    pass.setBindGroup(0, this.cachedBindGroups.zeroForces!);
     pass.dispatchWorkgroups(groups, 1, 1);
     pass.end();
     this.ctx.queue.submit([encoder.finish()]);
@@ -259,9 +337,7 @@ export class VirtualPipesSolver {
    * Optionally records the accumulator copy for a `ForceReadback` ring.
    */
   accumulateForces(opts?: {
-    /** If provided, encode a copy from `forceAccum` into this destination buffer. */
     copyTo?: GPUBuffer;
-    /** If provided, will be invoked with the encoder so callers can chain copies. */
     onEncoder?: (encoder: GPUCommandEncoder) => void;
   }): void {
     const dx = Math.ceil(this.grid.width / 8);
@@ -269,7 +345,7 @@ export class VirtualPipesSolver {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'isenflow.accumulate' });
     const pass = encoder.beginComputePass({ label: 'accumulate' });
     pass.setPipeline(this.pipelines.accumulate!);
-    pass.setBindGroup(0, this.bindAccumulate(this.pipelines.accumulate!));
+    pass.setBindGroup(0, this.cachedBindGroups.accumulate!);
     pass.dispatchWorkgroups(dx, dy, 1);
     pass.end();
 
@@ -279,92 +355,6 @@ export class VirtualPipesSolver {
     if (opts?.onEncoder) opts.onEncoder(encoder);
 
     this.ctx.queue.submit([encoder.finish()]);
-  }
-
-  private bindFluxes(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: { buffer: this.bed } },
-        { binding: 2, resource: { buffer: this.water } },
-        { binding: 3, resource: { buffer: this.fluxLR } },
-        { binding: 4, resource: { buffer: this.fluxUD } },
-        { binding: 5, resource: { buffer: this.boundary } },
-      ],
-    });
-  }
-
-  private bindUpdate(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: { buffer: this.water } },
-        { binding: 2, resource: { buffer: this.fluxLR } },
-        { binding: 3, resource: { buffer: this.fluxUD } },
-        { binding: 4, resource: { buffer: this.velocity } },
-        { binding: 5, resource: { buffer: this.boundary } },
-      ],
-    });
-  }
-
-  private bindDisplace(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: { buffer: this.bed } },
-        { binding: 2, resource: { buffer: this.water } },
-        { binding: 3, resource: { buffer: this.prevBed } },
-        { binding: 4, resource: { buffer: this.hDelta } },
-      ],
-    });
-  }
-
-  private bindFoldDelta(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: { buffer: this.water } },
-        { binding: 2, resource: { buffer: this.hDelta } },
-      ],
-    });
-  }
-
-  private bindSnapshot(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: { buffer: this.bed } },
-        { binding: 2, resource: { buffer: this.prevBed } },
-      ],
-    });
-  }
-
-  private bindAccumulate(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 1, resource: { buffer: this.bed } },
-        { binding: 2, resource: { buffer: this.water } },
-        { binding: 3, resource: { buffer: this.velocity } },
-        { binding: 4, resource: { buffer: this.chunkId } },
-        { binding: 5, resource: { buffer: this.chunkVel } },
-        { binding: 6, resource: { buffer: this.forceAccum } },
-        { binding: 7, resource: { buffer: this.chunkCOMs } },
-      ],
-    });
-  }
-
-  private bindZeroForces(pipeline: GPUComputePipeline): GPUBindGroup {
-    return this.ctx.device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.forceAccum } }],
-    });
   }
 
   // ---------- write helpers (called by demos / heightfield rasterizer) ----------
@@ -410,9 +400,9 @@ export class VirtualPipesSolver {
   }
 
   /**
-   * Stamp the total-bed channel only, leaving terrain intact. Used by the
-   * dynamic-body rasterizer so a moving crate raises the total above
-   * terrain without permanently rewriting the heightmap.
+   * Stamp the total-bed channel only, leaving terrain intact.
+   * P4 perf fix: read back terrain from CPU mirror, pack full 2-float rows,
+   * one writeBuffer per row instead of per cell.
    */
   writeBedTotalRegion(
     region: { x: number; y: number; w: number; h: number },
@@ -424,16 +414,12 @@ export class VirtualPipesSolver {
     const W = this.grid.width;
     for (let row = 0; row < region.h; row++) {
       const rowOffsetCells = (region.y + row) * W + region.x;
-      // .y is at offset 4 within the 8-byte cell. Pack one row of single
-      // floats and write each float at its individual offset.
-      // We could batch into one writeBuffer per row using a view that has
-      // gaps, but WebGPU writeBuffer does not support strides. Issue per cell.
+      const packed = new Float32Array(region.w * 2);
       for (let i = 0; i < region.w; i++) {
-        const cell = rowOffsetCells + i;
-        const v = values[row * region.w + i]!;
-        const arr = new Float32Array([v]);
-        this.ctx.queue.writeBuffer(this.bed, cell * 8 + 4, arr.buffer, 0, 4);
+        packed[i * 2] = this.terrainMirror[rowOffsetCells + i]!;
+        packed[i * 2 + 1] = values[row * region.w + i]!;
       }
+      this.ctx.queue.writeBuffer(this.bed, rowOffsetCells * 2 * 4, packed.buffer, packed.byteOffset, region.w * 2 * 4);
     }
   }
 
@@ -568,6 +554,24 @@ export class VirtualPipesSolver {
     }
   }
 
+  /**
+   * Set both boundary type and target depth for a region. Inflow (4) uses
+   * the target as a floor; Sea (5) pins to it exactly.
+   */
+  writeBoundaryRegionTarget(
+    region: { x: number; y: number; w: number; h: number },
+    boundaryType: number,
+    targetDepth: number,
+  ): void {
+    this.writeBoundaryRegion(region, boundaryType);
+    const W = this.grid.width;
+    const row = new Float32Array(region.w).fill(targetDepth);
+    for (let r = 0; r < region.h; r++) {
+      const rowOffsetCells = (region.y + r) * W + region.x;
+      this.ctx.queue.writeBuffer(this.boundaryTargetH, rowOffsetCells * 4, row.buffer, row.byteOffset, region.w * 4);
+    }
+  }
+
   // ---------- readback helpers ----------
 
   private async readF32Buffer(buf: GPUBuffer): Promise<Float32Array> {
@@ -623,7 +627,8 @@ export class VirtualPipesSolver {
   destroy(): void {
     for (const b of [
       this.bed, this.water, this.fluxLR, this.fluxUD, this.velocity,
-      this.chunkId, this.chunkVel, this.boundary, this.prevBed, this.hDelta,
+      this.chunkId, this.chunkVel, this.boundary, this.boundaryTargetH,
+      this.prevBed, this.hDelta,
       this.forceAccum, this.chunkCOMs, this.params,
     ]) {
       b.destroy();

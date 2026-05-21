@@ -155,7 +155,8 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
   const solver = new VirtualPipesSolver(gpu, grid, {
     dt: 1 / 240,
     substepsPerFrame: 1,
-    damping: 0.99,
+    damping: 0.5,
+    manningN: 0.03,
   });
   const rasterizer = new HeightfieldRasterizer(solver);
   const splashes = new SplashParticleSystem(4000);
@@ -261,9 +262,10 @@ export async function switchDemo(ctx: DemoContext, demo: Demo): Promise<void> {
   const waterReset = new Float32Array(cells);
   if (init > 0) waterReset.fill(init);
   ctx.solver.writeWaterFull(waterReset);
-  // Reset boundary to Interior(0).
-  ctx.solver.writeBoundaryRegion(
+  // Reset boundary to Interior(0) and clear target depths.
+  ctx.solver.writeBoundaryRegionTarget(
     { x: 0, y: 0, w: ctx.solver.grid.width, h: ctx.solver.grid.height },
+    0,
     0,
   );
   ctx.world = new ctx.rapier.World({ x: 0, y: -9.81, z: 0 });

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Demo } from '../shared/Scene.js';
 import { ownByDemo } from '../shared/Scene.js';
 import { WaterSurface } from '../shared/Water.js';
+import { BoundaryType } from 'isenflow';
 
 const demo: Demo = {
   id: '05-tsunami',
@@ -22,6 +23,19 @@ const demo: Demo = {
     wallMesh.position.set(g.origin[0] + (wallX + 0.5) * g.dx, 1.1, g.origin[1] + (g.height * g.dx) / 2);
     ctx.scene.add(wallMesh);
 
+    // Inflow boundary on west edge — tide ramps via writeBoundaryRegionTarget
+    ctx.solver.writeBoundaryRegionTarget(
+      { x: 0, y: 0, w: 1, h: g.height },
+      BoundaryType.Inflow,
+      0,
+    );
+    // Open boundary on east edge
+    ctx.solver.writeBoundaryRegionTarget(
+      { x: g.width - 1, y: 0, w: 1, h: g.height },
+      BoundaryType.Open,
+      0,
+    );
+
     const water = new WaterSurface(ctx.solver);
     ctx.scene.add(ownByDemo(water.mesh));
     ctx.scratch.water = water;
@@ -35,7 +49,12 @@ const demo: Demo = {
     const g = ctx.solver.grid;
     const tideH = Math.min(3.5, 0.5 * (ctx.scratch.t as number));
     ctx.scratch.tideH = tideH;
-    ctx.solver.writeWaterRegion({ x: 0, y: 0, w: 1, h: g.height }, new Float32Array(g.height).fill(tideH));
+    // Ramp tide via boundary target depth instead of writeWaterRegion
+    ctx.solver.writeBoundaryRegionTarget(
+      { x: 0, y: 0, w: 1, h: g.height },
+      BoundaryType.Inflow,
+      tideH,
+    );
   },
 };
 

@@ -51,6 +51,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   ud.x = max(0.0, ud.x * params.damping + params.dt * accel * dh_D);
   ud.y = max(0.0, ud.y * params.damping + params.dt * accel * dh_U);
 
+  // Manning bed-friction (SWASHES §1 eqs. 1-2, semi-implicit).
+  // cf = g·n²/h^(4/3), attenuate: q' = q / (1 + dt·cf·|u|)
+  if (params.manningN > 0.0) {
+    let h_L_nbr = h_at(&water, p_L, w, h);
+    let h_R_nbr = h_at(&water, p_R, w, h);
+    let h_D_nbr = h_at(&water, p_D, w, h);
+    let h_U_nbr = h_at(&water, p_U, w, h);
+    let n2 = params.manningN * params.manningN;
+
+    var h_pipe_L = max(0.01, 0.5 * (h_self + h_L_nbr));
+    var speed_L  = abs(lr.x) / (params.dx * h_pipe_L);
+    var cf_L     = params.gravity * n2 / pow(h_pipe_L, 4.0/3.0);
+    lr.x = lr.x / (1.0 + params.dt * cf_L * speed_L);
+
+    var h_pipe_R = max(0.01, 0.5 * (h_self + h_R_nbr));
+    var speed_R  = abs(lr.y) / (params.dx * h_pipe_R);
+    var cf_R     = params.gravity * n2 / pow(h_pipe_R, 4.0/3.0);
+    lr.y = lr.y / (1.0 + params.dt * cf_R * speed_R);
+
+    var h_pipe_D = max(0.01, 0.5 * (h_self + h_D_nbr));
+    var speed_D  = abs(ud.x) / (params.dx * h_pipe_D);
+    var cf_D     = params.gravity * n2 / pow(h_pipe_D, 4.0/3.0);
+    ud.x = ud.x / (1.0 + params.dt * cf_D * speed_D);
+
+    var h_pipe_U = max(0.01, 0.5 * (h_self + h_U_nbr));
+    var speed_U  = abs(ud.y) / (params.dx * h_pipe_U);
+    var cf_U     = params.gravity * n2 / pow(h_pipe_U, 4.0/3.0);
+    ud.y = ud.y / (1.0 + params.dt * cf_U * speed_U);
+  }
+
   let total_out = (lr.x + lr.y + ud.x + ud.y) * params.dt;
   let volume_available = max(0.0, h_self) * params.dx * params.dx;
   let K = select(min(1.0, volume_available / max(total_out, 1e-9)), 0.0, h_self <= 0.0);
