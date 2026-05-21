@@ -21,6 +21,13 @@ const demo: Demo = {
     for (let j = 0; j < bankCells; j++) ctx.solver.writeBedRegion({ x: 0, y: j, w: g.width, h: 1 }, bank);
     for (let j = g.height - bankCells; j < g.height; j++) ctx.solver.writeBedRegion({ x: 0, y: j, w: g.width, h: 1 }, bank);
 
+    // Solid river bed: a wide static collider at y=0 so dynamic bodies cannot
+    // tunnel through if the GPU buoyancy coupling momentarily misbehaves
+    // (it still drives drag and lift; this is just a floor of last resort).
+    const worldW = g.width * g.dx;
+    const bed = ctx.world.createRigidBody(ctx.rapier.RigidBodyDesc.fixed().setTranslation(0, -0.05, 0));
+    ctx.world.createCollider(ctx.rapier.ColliderDesc.cuboid(worldW / 2, 0.05, worldW / 2), bed);
+
     // Crate: 0.4m × 0.2m × 0.4m, density of pine wood (~400 kg/m³).
     const halfX = 0.2, halfY = 0.1, halfZ = 0.2;
     const crateGeo = new THREE.BoxGeometry(halfX * 2, halfY * 2, halfZ * 2);
@@ -31,11 +38,16 @@ const demo: Demo = {
     crate.position.set(startX, 0.3, 0);
     ctx.scene.add(crate);
 
+    // Substantial linear damping models the water's effective drag on the
+    // crate and—critically—keeps things stable while the GPU readback adds
+    // ~3 frames of latency to the buoyancy/drag coupling. Without this the
+    // body can build up runaway vertical velocity when the same stale force
+    // is re-applied for several frames before fresh data arrives.
     const body = ctx.world.createRigidBody(
       ctx.rapier.RigidBodyDesc.dynamic()
         .setTranslation(startX, 0.3, 0)
-        .setLinearDamping(0.05)
-        .setAngularDamping(0.5),
+        .setLinearDamping(4.0)
+        .setAngularDamping(2.0),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfX, halfY, halfZ).setDensity(400),

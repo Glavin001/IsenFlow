@@ -24,10 +24,11 @@ const demo: Demo = {
     const chunks: ChunkEntry[] = [];
     const positions = [0.3, 0.5, 0.7].map((f) => Math.floor(g.width * f));
     // Staggered budgets so upstream walls fracture before downstream ones.
-    // F ≈ 0.5·ρ·g·tide²·(g.height·g.dx). decay=0.92 per tick → equilibrium
-    // stress ≈ F·dt/0.08. Calibrated for the 16 m world and dt cap 0.05 so
-    // walls fail at tide ≈ 1.3 / 2.4 / 3.4 m.
-    const budgets = [80000, 280000, 550000];
+    // F ≈ 0.5·ρ·g·tide²·(g.height·g.dx). The stress accumulator is integrated
+    // at a fixed STRESS_DT (see `tick`) so behavior is framerate-invariant.
+    // With STRESS_DT = 1/60 and decay = 0.92, equilibrium ≈ F·0.208.
+    // Calibrated for the 16 m world so walls fail at tide ≈ 1.3 / 2.2 / 3.2 m.
+    const budgets = [25000, 85000, 170000];
     positions.forEach((px, idx) => {
       const region = { x: px, y: 0, w: 1, h: g.height };
       const wall = new Float32Array(g.height).fill(3);
@@ -62,14 +63,23 @@ const demo: Demo = {
     ctx.scratch.tideH = tide;
     ctx.solver.writeWaterRegion({ x: 0, y: 0, w: 1, h: g.height }, new Float32Array(g.height).fill(tide));
 
+    // Framerate-invariant stress integration: tickStress uses a per-tick
+    // decay, so we drive it with a fixed sub-dt (1/60 s) and run as many
+    // sub-ticks as cover the sim time advanced this frame. This keeps the
+    // budget calibration above stable across 30/60/120+ fps render rates.
+    const STRESS_DT = 1 / 60;
+    const stressTicks = Math.max(1, Math.round(dt / STRESS_DT));
     const chunks = ctx.scratch.chunks as ChunkEntry[];
     const scheduler = ctx.scratch.scheduler as FractureScheduler<ChunkEntry>;
     for (const c of chunks) {
       if (!c.mesh.visible) continue;
       // Hydrostatic load on a wall column ≈ ½·ρ·g·h²·L (per unit thickness).
       const F = 0.5 * 1000 * 9.81 * tide * tide * g.height * g.dx;
-      if (tickStress(c.stress, F, dt)) {
-        scheduler.request(c, 1.0 / Math.max(1, c.index + 1));
+      for (let s = 0; s < stressTicks; s++) {
+        if (tickStress(c.stress, F, STRESS_DT)) {
+          scheduler.request(c, 1.0 / Math.max(1, c.index + 1));
+          break;
+        }
       }
     }
     const drained = scheduler.drainFrame();

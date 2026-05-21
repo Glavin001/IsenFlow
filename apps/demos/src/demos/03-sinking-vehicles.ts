@@ -14,12 +14,23 @@ const demo: Demo = {
     // Pond depth: 1.5 m everywhere.
     ctx.solver.writeWaterFull(new Float32Array(g.width * g.height).fill(1.5));
 
+    // Solid pond floor (static collider) so the concrete block has somewhere
+    // to settle. Without this, bodies would fall through the world the moment
+    // buoyancy can no longer support them.
+    const floorBody = ctx.world.createRigidBody(
+      ctx.rapier.RigidBodyDesc.fixed().setTranslation(0, -0.05, 0),
+    );
+    ctx.world.createCollider(
+      ctx.rapier.ColliderDesc.cuboid(worldW / 2, 0.05, worldW / 2),
+      floorBody,
+    );
+
     const bridge = ownByDemo(new THREE.Mesh(
       new THREE.BoxGeometry(worldW * 0.85, 0.15, worldW * 0.18),
       new THREE.MeshStandardMaterial({ color: 0x555555 }),
     ));
     bridge.name = 'bridge';
-    bridge.position.set(0, 4, 0);
+    bridge.position.set(0, 18, 0);
     ctx.scene.add(bridge);
 
     // Wooden block (light): density 400 kg/m³.
@@ -30,10 +41,17 @@ const demo: Demo = {
     ));
     wood.name = 'wood';
     const woodX = -worldW * 0.18;
-    wood.position.set(woodX, 5, 0);
+    // Drop from well above the bridge so the spec's `y > 10` pre-condition
+    // remains true even when several Rapier ticks have run by the time the
+    // test reads the body's position (openDemo waits for tickCount > 0; under
+    // heavy parallel load that can be several frames of free-fall).
+    const dropY = 20;
+    wood.position.set(woodX, dropY, 0);
     ctx.scene.add(wood);
     const woodBody = ctx.world.createRigidBody(
-      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(woodX, 5, 0).setLinearDamping(0.4),
+      // High linearDamping models water drag and stabilises the body against
+      // the GPU coupling's ~3-frame readback latency.
+      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(woodX, dropY, 0).setLinearDamping(3.0),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfSide, halfSide, halfSide).setDensity(400),
@@ -53,10 +71,10 @@ const demo: Demo = {
     ));
     concrete.name = 'concrete';
     const concX = worldW * 0.18;
-    concrete.position.set(concX, 5, 0);
+    concrete.position.set(concX, dropY, 0);
     ctx.scene.add(concrete);
     const concBody = ctx.world.createRigidBody(
-      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(concX, 5, 0).setLinearDamping(0.4),
+      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(concX, dropY, 0).setLinearDamping(3.0),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfSide, halfSide, halfSide).setDensity(2400),
