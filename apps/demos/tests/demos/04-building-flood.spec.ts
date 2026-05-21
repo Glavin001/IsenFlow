@@ -31,15 +31,21 @@ test.describe('demo 04 — building flood', () => {
     const doorJ = (sc.doorJ as number);
     const doorI0 = sc.doorI0 as number;
     const doorI1 = sc.doorI1 as number;
+    const breachI0 = sc.breachI0 as number;
+    const breachI1 = sc.breachI1 as number;
 
-    // Tide depth on the south edge should match `min(2.5, 0.2*t)` ± 30%.
-    const southEdgeMean = await page.evaluate(
-      ({ j, w }: { j: number; w: number }) =>
-        window.__isenflow_app!.meanHRow(j, 0, w),
-      { j: grid.height - 1, w: grid.width },
+    // Tide depth at the breach cells (south edge) should be close to the
+    // pinned tide value. We average h *within the breach span only* — the
+    // rest of the south row is wall (h=0), so averaging the full row would
+    // ratio (breach_width / W) ≈ 0.09 to the tide depth (≈ 0.23 m for a
+    // 1.5 m breach at tide=2.5 m) and never clear `tideH * 0.5`.
+    const breachMean = await page.evaluate(
+      ({ j, i0, i1 }: { j: number; i0: number; i1: number }) =>
+        window.__isenflow_app!.meanHRow(j, i0, i1),
+      { j: grid.height - 1, i0: breachI0, i1: breachI1 },
     );
     expect(tideH, 'tide ramped').toBeGreaterThanOrEqual(2.0);
-    expect(southEdgeMean, `south-edge mean h vs tide ${tideH.toFixed(2)}`).toBeGreaterThan(tideH * 0.5);
+    expect(breachMean, `breach mean h vs tide ${tideH.toFixed(2)}`).toBeGreaterThan(tideH * 0.5);
 
     // Water has reached the door cells (depth > 0.2m).
     const doorMean = await page.evaluate(

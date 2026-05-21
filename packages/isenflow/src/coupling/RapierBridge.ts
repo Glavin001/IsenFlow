@@ -204,7 +204,17 @@ export function applyStabilizedForces(
 /**
  * Clamp coupled body velocities after Rapier step (safety net).
  * Must be called AFTER `world.step()` to be effective.
+ *
+ * `vyDamping` and `maxVy` are stability tools for the buoyancy↔rasterizer
+ * feedback loop — applying them to a body that's still in free-fall (well
+ * above its reference water surface) caps it at terminal ~0.67 m/s and
+ * the body appears to hover. We gate both on whether the body bottom is
+ * within `AIR_MARGIN` of the bed+water reference height; outside that
+ * margin the body is treated as in air and its vertical velocity is left
+ * alone. Horizontal clamping still applies (cheap, never bites in air).
  */
+const AIR_MARGIN_METRES = 0.1;
+
 export function clampCoupledVelocities(
   bodies: ReadonlyMap<number, CoupledBodyInfo>,
   opts: StabilizedForcesOptions = {},
@@ -214,10 +224,17 @@ export function clampCoupledVelocities(
   const vyDamp = opts.vyDamping ?? 0.85;
   for (const [_key, cb] of bodies) {
     const lv = cb.body.linvel();
+    const halfY = cb.halfExtents[1] ?? 0;
+    const t = cb.body.translation();
+    const bodyBottom = t.y - halfY;
+    const surfaceY = cb.bedLevelRef + cb.waterLevelRef;
+    const inAir = bodyBottom > surfaceY + AIR_MARGIN_METRES;
+
     const cx = clamp(lv.x, maxH);
-    // Dampen vertical velocity each frame to suppress rasterizer↔buoyancy oscillation
-    const cy = clamp(lv.y * vyDamp, maxVy);
     const cz = clamp(lv.z, maxH);
+    // In air: leave vy alone. In/near water: dampen vertical velocity each
+    // frame to suppress rasterizer↔buoyancy oscillation, then clamp.
+    const cy = inAir ? lv.y : clamp(lv.y * vyDamp, maxVy);
     if (lv.x !== cx || lv.y !== cy || lv.z !== cz) {
       cb.body.setLinvel({ x: cx, y: cy, z: cz }, true);
     }

@@ -233,6 +233,61 @@ describe('RapierBridge', () => {
       // -100 * 0.85 = -85, clamped to -3
       expect(body._vel.y).toBe(-3);
     });
+
+    it('leaves vy alone for bodies in free fall (well above water surface)', () => {
+      // Body at y=20, halfY=0.25. Reference surface = bed(0) + water(1.5) = 1.5.
+      // Body bottom = 19.75 ≫ 1.5 + 0.1 → in air → no damping, no clamp.
+      const body = mockBody({ pos: { x: 0, y: 20, z: 0 }, vel: { x: 0, y: -50, z: 0 } });
+      const bodies = new Map([[1, {
+        chunkId: 1, body,
+        halfExtents: [0.25, 0.25, 0.25] as [number, number, number],
+        waterLevelRef: 1.5, bedLevelRef: 0,
+      }]]);
+      clampCoupledVelocities(bodies);
+      // setLinvel was not called because (x=0, z=0) and y is unchanged.
+      expect(body.setLinvel).not.toHaveBeenCalled();
+      expect(body._vel.y).toBe(-50);
+    });
+
+    it('damps + clamps vy when the body bottom is within the in-water margin', () => {
+      // Body at y=0.7 with halfY=0.1 → bottom=0.6. Surface=0.8. 0.6 ≤ 0.9
+      // → in water → vy damped & clamped.
+      const body = mockBody({ pos: { x: 0, y: 0.7, z: 0 }, vel: { x: 0, y: -100, z: 0 } });
+      const bodies = new Map([[1, {
+        chunkId: 1, body,
+        halfExtents: [0.2, 0.1, 0.2] as [number, number, number],
+        waterLevelRef: 0.8, bedLevelRef: 0,
+      }]]);
+      clampCoupledVelocities(bodies);
+      expect(body._vel.y).toBe(-3); // -100 * 0.85 = -85, clamped to -3
+    });
+
+    it('still clamps horizontal velocity even when the body is in air', () => {
+      // High-y body with large horizontal velocity. Horizontal should still
+      // be clamped (cheap, no behaviour change in air); only vy is freed.
+      const body = mockBody({ pos: { x: 0, y: 20, z: 0 }, vel: { x: 20, y: -10, z: -15 } });
+      const bodies = new Map([[1, {
+        chunkId: 1, body,
+        halfExtents: [0.25, 0.25, 0.25] as [number, number, number],
+        waterLevelRef: 1.5, bedLevelRef: 0,
+      }]]);
+      clampCoupledVelocities(bodies);
+      expect(body._vel.x).toBe(5);
+      expect(body._vel.z).toBe(-5);
+      expect(body._vel.y).toBe(-10); // untouched
+    });
+
+    it('bedLevelRef > 0 shifts the water-surface threshold', () => {
+      // Elevated water (bed=2, water=1) → surface=3. Body at y=10 is in air.
+      const body = mockBody({ pos: { x: 0, y: 10, z: 0 }, vel: { x: 0, y: -30, z: 0 } });
+      const bodies = new Map([[1, {
+        chunkId: 1, body,
+        halfExtents: [0.2, 0.2, 0.2] as [number, number, number],
+        waterLevelRef: 1.0, bedLevelRef: 2.0,
+      }]]);
+      clampCoupledVelocities(bodies);
+      expect(body._vel.y).toBe(-30);
+    });
   });
 
   // ---- Force cap regression test ----
