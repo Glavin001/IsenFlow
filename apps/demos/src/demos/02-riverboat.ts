@@ -64,7 +64,11 @@ const demo: Demo = {
       ctx.rapier.RigidBodyDesc.dynamic()
         .setTranslation(startX, spawnY, 0)
         .setLinearDamping(2.0)
-        .setAngularDamping(5.0),
+        .setAngularDamping(5.0)
+        // Keep the crate upright: lock pitch (X) and roll (Z) so coupling
+        // numerics can't tip it over. Yaw (Y) stays free so the crate can
+        // turn naturally with the current.
+        .enabledRotations(false, true, false),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfX, halfY, halfZ).setDensity(400),

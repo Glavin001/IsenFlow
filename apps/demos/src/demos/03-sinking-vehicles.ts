@@ -50,8 +50,13 @@ const demo: Demo = {
     ctx.scene.add(wood);
     const woodBody = ctx.world.createRigidBody(
       // High linearDamping models water drag and stabilises the body against
-      // the GPU coupling's ~3-frame readback latency.
-      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(woodX, dropY, 0).setLinearDamping(3.0),
+      // the GPU coupling's ~3-frame readback latency. Lock pitch & roll so
+      // the block stays upright through impact and water-coupled forces.
+      ctx.rapier.RigidBodyDesc.dynamic()
+        .setTranslation(woodX, dropY, 0)
+        .setLinearDamping(3.0)
+        .setAngularDamping(5.0)
+        .enabledRotations(false, true, false),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfSide, halfSide, halfSide).setDensity(400),
@@ -76,7 +81,11 @@ const demo: Demo = {
     concrete.position.set(concX, dropY, 0);
     ctx.scene.add(concrete);
     const concBody = ctx.world.createRigidBody(
-      ctx.rapier.RigidBodyDesc.dynamic().setTranslation(concX, dropY, 0).setLinearDamping(3.0),
+      ctx.rapier.RigidBodyDesc.dynamic()
+        .setTranslation(concX, dropY, 0)
+        .setLinearDamping(3.0)
+        .setAngularDamping(5.0)
+        .enabledRotations(false, true, false),
     );
     ctx.world.createCollider(
       ctx.rapier.ColliderDesc.cuboid(halfSide, halfSide, halfSide).setDensity(2400),
