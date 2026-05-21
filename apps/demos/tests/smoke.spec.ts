@@ -8,6 +8,8 @@ const DEMOS = [
   '05-tsunami',
   '06-cascading-destruction',
   '07-splash',
+  '08-impact',
+  '09-city-flood',
 ];
 
 test('demo selector lists all demos', async ({ page }) => {
