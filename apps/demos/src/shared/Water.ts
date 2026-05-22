@@ -34,7 +34,6 @@ import {
   div,
   mul,
   smoothstep,
-  time,
 } from 'three/tsl';
 import type { VirtualPipesSolver } from 'isenflow';
 
@@ -68,6 +67,7 @@ export class WaterSurface {
   private readonly uSize = uniform(2.0);
   private readonly uDetailStrength = uniform(0.35);
   private readonly uHasEnv = uniform(0);
+  private readonly uTime = uniform(0);
 
   private readonly envTexture: THREE.Texture;
   private envNode: ReturnType<typeof pmremTexture> | null = null;
@@ -156,7 +156,7 @@ export class WaterSurface {
     // The solver geometry already carries the real wave shape, so two taps
     // provide enough surface detail without the cost of the WaterMesh's four.
     const getNoise = Fn(([uv]: [ReturnType<typeof vec2>]) => {
-      const offset = time;
+      const offset = this.uTime;
       const uv0 = add(div(uv, 103), vec2(div(offset, 17), div(offset, 29))).toVar();
       const uv1 = div(uv, 107).sub(vec2(div(offset, -19), div(offset, 31))).toVar();
       const s0 = normalsTex.uv(uv0);
@@ -229,6 +229,11 @@ export class WaterSurface {
 
   get oceanStyle(): boolean {
     return this._oceanStyle;
+  }
+
+  /** Advance the shader animation clock by the given amount (seconds). */
+  advanceTime(dt: number): void {
+    this.uTime.value += dt;
   }
 
   /** Pull the current water depth from the GPU every ~3 frames. */

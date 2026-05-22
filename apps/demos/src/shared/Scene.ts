@@ -429,8 +429,8 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
 
       // Adaptive substepping: advance roughly `simSpeed × dt` of sim time
       // per render frame, never more than MAX_SUBSTEPS sub-ticks.
-      const target = Math.max(0, dt) * Math.max(0.1, ctx.simSpeed);
-      const subs = Math.min(MAX_SUBSTEPS, Math.max(1, Math.floor(target / dtSub) || 1));
+      const target = Math.max(0, dt) * Math.max(0, ctx.simSpeed);
+      const subs = ctx.simSpeed <= 0 ? 0 : Math.min(MAX_SUBSTEPS, Math.max(1, Math.floor(target / dtSub) || 1));
       const simAdvance = subs * dtSub;
       ctx.simTime += simAdvance;
       ctx.lastSubsteps = subs;
@@ -470,6 +470,10 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
         }
         applyStabilizedForces(bodyInfos, ctx.lastForces, forceSmoother, ctx.solver.grid.dx);
       }
+
+      // 4b) Advance water shader animation clock by sim time.
+      const water = ctx.scratch.water as { advanceTime?: (dt: number) => void } | undefined;
+      if (water?.advanceTime) water.advanceTime(simAdvance);
 
       // 5) Demo-specific update.
       activeDemo.tick(ctx, simAdvance);

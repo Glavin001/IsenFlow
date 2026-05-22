@@ -73,6 +73,27 @@ async function main() {
   ctx.simSpeed = parseFloat(speedEl.value);
   speedValEl.textContent = `${fmt(ctx.simSpeed, 2)}×`;
 
+  const pauseBtn = $('hud-pause') as HTMLButtonElement;
+  let isPaused = false;
+  let savedSimSpeed = ctx.simSpeed;
+
+  const togglePause = () => {
+    isPaused = !isPaused;
+    if (isPaused) {
+      savedSimSpeed = ctx.simSpeed || savedSimSpeed;
+      ctx.simSpeed = 0;
+      pauseBtn.textContent = 'Resume';
+      speedEl.disabled = true;
+    } else {
+      ctx.simSpeed = savedSimSpeed;
+      speedEl.value = String(savedSimSpeed);
+      speedValEl.textContent = `${fmt(savedSimSpeed, 2)}×`;
+      pauseBtn.textContent = 'Pause';
+      speedEl.disabled = false;
+    }
+  };
+  pauseBtn.addEventListener('click', togglePause);
+
   const oceanToggle = $('oceanToggle') as HTMLInputElement;
   oceanToggle.addEventListener('change', () => {
     const water = ctx.scratch.water as WaterSurface | undefined;
@@ -109,9 +130,14 @@ async function main() {
 
   // Press "R" to reset the current demo without switching.
   window.addEventListener('keydown', (e) => {
+    if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
     if (e.key === 'r' || e.key === 'R') {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+      if (isPaused) togglePause();
       void pickFromHash();
+    }
+    if (e.key === ' ') {
+      e.preventDefault();
+      togglePause();
     }
   });
 
