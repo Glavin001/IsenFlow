@@ -14,7 +14,7 @@ import {
   texture,
   uniform,
   varying,
-  positionLocal,
+  attribute,
   positionWorld,
   cameraPosition,
   transformedNormalWorld,
@@ -33,6 +33,7 @@ import {
   sub,
   div,
   mul,
+  smoothstep,
   time,
 } from 'three/tsl';
 import type { VirtualPipesSolver } from 'isenflow';
@@ -43,7 +44,10 @@ export class WaterSurface {
   readonly mesh: THREE.Mesh;
   readonly geom: THREE.PlaneGeometry;
   readonly material: NodeMaterial;
+  readonly simpleMaterial: THREE.MeshStandardMaterial;
+  private _oceanStyle = true;
   private positions: Float32BufferAttribute;
+  private depthAttr: Float32BufferAttribute;
 
   private framesSinceRead = 0;
   private reading = false;
@@ -75,6 +79,10 @@ export class WaterSurface {
     this.geom = new THREE.PlaneGeometry(g.width * g.dx, g.height * g.dx, g.width, g.height);
     this.geom.rotateX(-Math.PI / 2);
     this.positions = this.geom.attributes.position as Float32BufferAttribute;
+    this.depthAttr = new THREE.Float32BufferAttribute(
+      new Float32Array((g.width + 1) * (g.height + 1)), 1,
+    ) as Float32BufferAttribute;
+    this.geom.setAttribute('waterDepth', this.depthAttr);
 
     // Tiled animated normal map (vendored locally — no network at runtime).
     const loader = new THREE.TextureLoader();
@@ -88,6 +96,14 @@ export class WaterSurface {
     this.envTexture.needsUpdate = true;
 
     this.material = this.buildMaterial(normals);
+    this.simpleMaterial = new THREE.MeshStandardMaterial({
+      color: 0x3870c8,
+      transparent: true,
+      opacity: 0.85,
+      roughness: 0.2,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+    });
     this.mesh = new THREE.Mesh(this.geom, this.material);
     this.mesh.name = 'water';
     this.mesh.position.set(
@@ -148,11 +164,12 @@ export class WaterSurface {
       return s0.add(s1).sub(1);
     });
 
-    // Forward local Y to the fragment so we can discard the dry-cell sentinel.
-    const vCellY = varying(positionLocal.y, 'vCellY');
+    // Per-vertex water depth drives alpha fade at shoreline edges.
+    const vDepth = varying(attribute('waterDepth'), 'vDepth');
 
     material.fragmentNode = Fn(() => {
-      Discard(vCellY.lessThan(-0.5));
+      Discard(vDepth.lessThanEqual(0.0));
+      const edgeAlpha = smoothstep(float(0.0), float(0.02), vDepth);
 
       // Mesh-derived world-space normal: this is the solver-shaped surface
       // (waves, dam-break front, etc.), recomputed every readback via
@@ -196,12 +213,22 @@ export class WaterSurface {
         reflectance,
       );
 
-      return vec4(albedo, this.uAlpha);
+      return vec4(albedo, this.uAlpha.mul(edgeAlpha));
     })();
 
     material.transparent = true;
     material.side = THREE.DoubleSide;
     return material;
+  }
+
+  /** Toggle between the ocean NodeMaterial and a simple flat material. */
+  setOceanStyle(enabled: boolean): void {
+    this._oceanStyle = enabled;
+    this.mesh.material = enabled ? this.material : this.simpleMaterial;
+  }
+
+  get oceanStyle(): boolean {
+    return this._oceanStyle;
   }
 
   /** Pull the current water depth from the GPU every ~3 frames. */
@@ -225,10 +252,17 @@ export class WaterSurface {
             const idx = (cj * g.width + ci) * 2;
             const h = w[idx] ?? 0;
             const bedTotal = b[idx + 1] ?? 0;
-            const y = h > 0.005 ? bedTotal + h : -1000;
-            pos.setY(j * nx + i, y);
+            const vi = j * nx + i;
+            if (h > 0.001) {
+              pos.setY(vi, bedTotal + h);
+              this.depthAttr.setX(vi, h);
+            } else {
+              pos.setY(vi, bedTotal);
+              this.depthAttr.setX(vi, 0);
+            }
           }
         }
+        this.depthAttr.needsUpdate = true;
         pos.needsUpdate = true;
         this.geom.computeVertexNormals();
         this.consecutiveErrors = 0;
