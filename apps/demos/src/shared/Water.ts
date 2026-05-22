@@ -233,7 +233,7 @@ export class WaterSurface {
 
   /** Advance the shader animation clock by the given amount (seconds). */
   advanceTime(dt: number): void {
-    this.uTime.value += dt;
+    this.uTime.value += dt * 0.15;
   }
 
   /** Pull the current water depth from the GPU every ~3 frames. */
