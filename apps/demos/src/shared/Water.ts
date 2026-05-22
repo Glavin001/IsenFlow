@@ -83,8 +83,9 @@ export class WaterSurface {
     normals.wrapT = THREE.RepeatWrapping;
 
     // Placeholder env texture until the demo wires the real PMREM target in.
-    // We keep a stable Texture reference so PMREMNode.value swaps cleanly.
-    this.envTexture = new THREE.Texture();
+    // Must be a valid DataTexture (not empty) so pmremTexture can build.
+    this.envTexture = new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1);
+    this.envTexture.needsUpdate = true;
 
     this.material = this.buildMaterial(normals);
     this.mesh = new THREE.Mesh(this.geom, this.material);
@@ -135,18 +136,16 @@ export class WaterSurface {
     const material = new NodeMaterial();
     const normalsTex = texture(waterNormals);
 
-    // Four animated taps, summed and remapped to [-1, 1] — same trick as WaterMesh.
+    // Two animated taps at different scales, remapped to [-1, 1].
+    // The solver geometry already carries the real wave shape, so two taps
+    // provide enough surface detail without the cost of the WaterMesh's four.
     const getNoise = Fn(([uv]: [ReturnType<typeof vec2>]) => {
       const offset = time;
       const uv0 = add(div(uv, 103), vec2(div(offset, 17), div(offset, 29))).toVar();
       const uv1 = div(uv, 107).sub(vec2(div(offset, -19), div(offset, 31))).toVar();
-      const uv2 = add(div(uv, vec2(8907.0, 9803.0)), vec2(div(offset, 101), div(offset, 97))).toVar();
-      const uv3 = sub(div(uv, vec2(1091.0, 1027.0)), vec2(div(offset, 109), div(offset, -113))).toVar();
       const s0 = normalsTex.uv(uv0);
       const s1 = normalsTex.uv(uv1);
-      const s2 = normalsTex.uv(uv2);
-      const s3 = normalsTex.uv(uv3);
-      return s0.add(s1).add(s2).add(s3).mul(0.5).sub(1);
+      return s0.add(s1).sub(1);
     });
 
     // Forward local Y to the fragment so we can discard the dry-cell sentinel.
@@ -182,7 +181,7 @@ export class WaterSurface {
       // setEnvironment can swap the source texture later.
       const reflectDir = reflect(eyeDirection.negate(), surfaceNormal);
       const initialEnv = this._pendingEnv ?? this.envTexture;
-      const envNode = pmremTexture(initialEnv, reflectDir);
+      const envNode = pmremTexture(initialEnv, reflectDir, float(0));
       this.envNode = envNode;
       const envSample = envNode.mul(this.uHasEnv);
 

@@ -220,6 +220,10 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
   // returns a render target whose .texture we plug into scene.environment.
   pmrem.fromSceneAsync(envScene).then((rt) => {
     scene.environment = rt.texture;
+    scene.background = rt.texture;
+    // Sky is baked — remove the live mesh so it doesn't run atmospheric
+    // scattering per pixel every frame.
+    scene.remove(sky);
   });
 
   const groundGeom = new THREE.PlaneGeometry(WORLD, WORLD, 1, 1);
