@@ -111,6 +111,7 @@ export interface Demo {
 
 let activeDemo: Demo | null = null;
 let activeCtx: DemoContext | null = null;
+let resetChunkCounter: () => void = () => {};
 
 const MAX_FRAME_SAMPLES = 600;
 
@@ -196,6 +197,7 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
 
   const coupledBodies = new Map<number, CoupledBody>();
   let nextChunkId = 1;
+  resetChunkCounter = () => { nextChunkId = 1; };
 
   const ctx: DemoContext = {
     three: THREE,
@@ -253,36 +255,48 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
 
 export async function switchDemo(ctx: DemoContext, demo: Demo): Promise<void> {
   if (activeDemo?.cleanup && activeCtx) activeDemo.cleanup(activeCtx);
+
+  // Remove all demo-owned scene objects.
   for (const obj of [...ctx.scene.children]) {
     if ((obj as { userData?: { demoOwned?: boolean } }).userData?.demoOwned) {
       ctx.scene.remove(obj);
     }
   }
+
+  // Reset coupling state.
   ctx.bodies.clear();
   ctx.coupledBodies.clear();
+  resetChunkCounter();
+
+  // Reset bookkeeping.
   ctx.scratch = {};
   ctx.lastForces = null;
   ctx.simTime = 0;
   ctx.tickCount = 0;
   ctx.frameTimesMs.length = 0;
+  ctx.simStepMs.length = 0;
+
+  // Reset solver buffers: bed, water, flux, velocity, chunks, boundary.
+  ctx.solver.resetSimState();
   ctx.rasterizer.resetDynamicBodies();
-  // Wipe bed back to terrain seed by re-creating the solver state.
-  // Simpler: reset world + re-seed bed/water from grid.
   const cells = ctx.solver.grid.cells;
-  // Reset bed to terrain seed (single channel = bedSeed, total = bedSeed).
   ctx.solver.writeBedFull(new Float32Array(ctx.solver.grid.bedSeed));
-  // Reset water to grid.initialDepth (or zero).
   const init = ctx.solver.grid.initialDepth;
   const waterReset = new Float32Array(cells);
   if (init > 0) waterReset.fill(init);
   ctx.solver.writeWaterFull(waterReset);
-  // Reset boundary to Interior(0) and clear target depths.
   ctx.solver.writeBoundaryRegionTarget(
     { x: 0, y: 0, w: ctx.solver.grid.width, h: ctx.solver.grid.height },
     0,
     0,
   );
+
+  // Reset particles.
+  ctx.splashes.reset();
+
+  // Fresh physics world.
   ctx.world = new ctx.rapier.World({ x: 0, y: -9.81, z: 0 });
+
   activeDemo = demo;
   activeCtx = ctx;
   await demo.setup(ctx);

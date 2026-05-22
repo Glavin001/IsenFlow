@@ -510,6 +510,21 @@ export class VirtualPipesSolver {
     }
   }
 
+  /**
+   * Zero all dynamic simulation state (flux, velocity, chunks).
+   * Called on demo switch to prevent stale momentum bleeding across demos.
+   */
+  resetSimState(): void {
+    const cells = this.grid.cells;
+    const zero2 = new Float32Array(cells * 2);
+    this.ctx.queue.writeBuffer(this.fluxLR, 0, zero2);
+    this.ctx.queue.writeBuffer(this.fluxUD, 0, zero2);
+    this.ctx.queue.writeBuffer(this.velocity, 0, zero2);
+    this.clearChunkIds();
+    this.clearChunkVel();
+    this.setCpuBuoyancyMode(false);
+  }
+
   /** Reset the chunk-id buffer to zero (no chunks anywhere). */
   clearChunkIds(): void {
     const zeros = new Uint32Array(this.grid.cells);

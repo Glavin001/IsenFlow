@@ -33,6 +33,12 @@ export class SplashParticleSystem {
     }));
   }
 
+  /** Deactivate all particles (used on demo switch). */
+  reset(): void {
+    for (const p of this.pool) p.active = false;
+    this.cursor = 0;
+  }
+
   spawn(req: SpawnRequest): void {
     const count = Math.max(1, Math.floor(req.intensity * 30));
     for (let n = 0; n < count; n++) {
