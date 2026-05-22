@@ -1,4 +1,5 @@
 import { createDemoContext, startLoop, switchDemo, type Demo, type DemoContext } from './shared/Scene.js';
+import type { WaterSurface } from './shared/Water.js';
 
 import damBreak from './demos/01-dam-break.js';
 import riverboat from './demos/02-riverboat.js';
@@ -9,6 +10,7 @@ import cascading from './demos/06-cascading-destruction.js';
 import splashes from './demos/07-splash-showcase.js';
 import impact from './demos/08-impact.js';
 import cityFlood from './demos/09-city-flood.js';
+import mountainRiver from './demos/10-mountain-river.js';
 
 const demos: Demo[] = [
   damBreak,
@@ -20,6 +22,7 @@ const demos: Demo[] = [
   splashes,
   impact,
   cityFlood,
+  mountainRiver,
 ];
 
 async function main() {
@@ -70,6 +73,12 @@ async function main() {
   ctx.simSpeed = parseFloat(speedEl.value);
   speedValEl.textContent = `${fmt(ctx.simSpeed, 2)}×`;
 
+  const oceanToggle = $('oceanToggle') as HTMLInputElement;
+  oceanToggle.addEventListener('change', () => {
+    const water = ctx.scratch.water as WaterSurface | undefined;
+    if (water) water.setOceanStyle(oceanToggle.checked);
+  });
+
   startLoop(ctx, (s) => {
     fpsEl.textContent = String(s.fps);
     frameMsEl.textContent = fmt(s.frameMsP50, 1);
@@ -86,6 +95,8 @@ async function main() {
     desc.textContent = demo.description;
     try {
       await switchDemo(ctx, demo);
+      const water = ctx.scratch.water as WaterSurface | undefined;
+      if (water) water.setOceanStyle(oceanToggle.checked);
     } catch (err) {
       showFatal((err as Error).message);
     }
