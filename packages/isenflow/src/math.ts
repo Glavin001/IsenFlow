@@ -5,3 +5,5 @@ export * from './coupling/HydrostaticMath.js';
 export * from './destruction/StressAccumulator.js';
 export * from './destruction/FractureScheduler.js';
 export * from './boundaries/BoundaryConditions.js';
+export * from './math/swashes.js';
+export * from './core/cpu/CpuVirtualPipes.js';

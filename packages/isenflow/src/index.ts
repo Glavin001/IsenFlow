@@ -8,12 +8,15 @@ export { VirtualPipesSolver } from './core/VirtualPipesSolver.js';
 export type { SolverOptions } from './core/VirtualPipesSolver.js';
 
 export { HeightfieldRasterizer } from './coupling/HeightfieldRasterizer.js';
-export type { BoxObstacle } from './coupling/HeightfieldRasterizer.js';
+export type { BoxObstacle, DynamicBodyDescriptor } from './coupling/HeightfieldRasterizer.js';
 export { BodyTracker } from './coupling/BodyTracker.js';
 export { ForceReadback } from './coupling/ForceReadback.js';
 export type { ChunkForce } from './coupling/ForceReadback.js';
-export { applyForcesToBodies } from './coupling/RapierBridge.js';
-export type { RapierBodyLike } from './coupling/RapierBridge.js';
+export { applyForcesToBodies, applyStabilizedForces, clampCoupledVelocities, createForceSmootherState } from './coupling/RapierBridge.js';
+export type { RapierBodyLike, RapierBodyFull, RapierBodyMap, ApplyForcesOptions, CoupledBodyInfo, ForceSmootherState } from './coupling/RapierBridge.js';
+export { computeCpuBuoyancy, computeVerticalDamping, estimateFootprintCells } from './coupling/CpuBuoyancy.js';
+export { computeImpact, applyImpact, spawnImpactSplash } from './coupling/ImpactDisplacement.js';
+export type { ImpactParams, ImpactResult, ImpactShape, ComputedImpact } from './coupling/ImpactDisplacement.js';
 
 export { WallChunk } from './destruction/WallChunk.js';
 export type { WallChunkInit } from './destruction/WallChunk.js';

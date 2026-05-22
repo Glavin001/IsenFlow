@@ -28,7 +28,9 @@ export function createStress(budget: number, decay = 0.95): StressState {
  */
 export function tickStress(state: StressState, forceMagnitude: number, dt: number): boolean {
   if (state.fractured) return false;
-  state.accum = state.accum * state.decay + forceMagnitude * dt;
+  // Frame-rate independent decay: decay is calibrated for 1/60 s ticks
+  const effectiveDecay = Math.pow(state.decay, dt * 60);
+  state.accum = state.accum * effectiveDecay + forceMagnitude * dt;
   if (state.accum > state.budget) {
     state.fractured = true;
     return true;

@@ -16,6 +16,8 @@
     "test": "pnpm -r test",
     "test:unit": "pnpm -r test:unit",
     "test:e2e": "pnpm --filter demos test:e2e",
+    "test:e2e:real": "pnpm --filter demos exec playwright test --project=chromium-real-gpu",
+    "test:e2e:sw": "pnpm --filter demos exec playwright test --project=chromium-software",
     "preview": "pnpm --filter demos preview",
     "clean": "pnpm -r exec rm -rf dist node_modules/.vite"
   },

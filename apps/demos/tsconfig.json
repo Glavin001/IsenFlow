@@ -9,5 +9,11 @@
       "isenflow/math": ["../../packages/isenflow/src/math.ts"]
     }
   },
-  "include": ["src/**/*", "tests/**/*", "vite.config.ts", "playwright.config.ts"]
+  "include": [
+    "src/**/*",
+    "tests/**/*",
+    "vite.config.ts",
+    "playwright.config.ts",
+    "../../packages/isenflow/src/types.d.ts"
+  ]
 }

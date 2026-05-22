@@ -22,6 +22,18 @@ pnpm dev            # runs the demo app on http://localhost:5173
 
 Open the URL in **Chrome 121+ / Edge / Firefox / Safari 26+** (any browser shipping WebGPU). Use the dropdown in the top-left to switch demos.
 
+The HUD in the top-right reports:
+
+| Field | Meaning |
+|---|---|
+| **Render** | Render frames per second + median CPU frame cost (ms). |
+| **Sim step** | Median CPU encode cost of `solver.step()` (ms) per render frame, and the number of physics substeps run last frame. |
+| **Sim Hz** | Effective physics steps per real second (substeps × FPS). |
+| **Sim rate** | Sim time advanced per second of wall clock — `1.0×` = real time. |
+| **Speed** | Slider that drives the loop's `simSpeed` multiplier (default `2.0×`). |
+
+Default grid is **256 × 256 cells at `dx = 0.25 m`** (a 64 m × 64 m world). Internal solver tick is `1/240 s`; the loop runs as many substeps per render frame as needed to advance roughly `simSpeed × dt_real` of sim time.
+
 ### Build & preview
 
 ```bash
@@ -32,14 +44,32 @@ pnpm preview        # serves built demos on :4173
 ### Tests
 
 ```bash
-pnpm test:unit      # Vitest, pure-math only — runs in Node, no GPU
-pnpm test:e2e       # Playwright + Chromium + SwiftShader/Lavapipe — real WebGPU
+pnpm test:unit       # Vitest pure-math (Node, no GPU)
+pnpm test:e2e        # Playwright — runs both projects below
+pnpm test:e2e:real   # Real-GPU project: Apple Metal on macOS / hardware on Linux
+pnpm test:e2e:sw     # Software project: SwiftShader/Lavapipe (Linux CI default)
 ```
 
-The e2e suite includes:
-* a smoke test that loads every demo and checks for no uncaught errors
-* a "lake at rest" volume-conservation test (drift < 1 % over 300 steps)
-* a 1-D dam-break test (wave front position within ±50 % of the Stoker analytical prediction — pipes is dispersive)
+Playwright auto-detects the platform:
+
+| Platform | Real-GPU project flags | Software project flags |
+|---|---|---|
+| macOS | `--use-angle=metal --enable-unsafe-webgpu` | `--use-vulkan=swiftshader` (yields software fallback) |
+| Linux | `--ignore-gpu-blocklist --enable-unsafe-webgpu` | `--use-vulkan=swiftshader --enable-unsafe-swiftshader` |
+| Windows | `--use-angle=d3d11 --enable-unsafe-webgpu` | `--use-vulkan=swiftshader` |
+
+The real-GPU project **fails** (does not skip) if the adapter is SwiftShader / Lavapipe / Microsoft Basic Render Driver. In CI:
+- Linux runners: software project only (no real GPU).
+- macOS runners: real-GPU project (Apple Metal).
+
+The e2e suite asserts:
+* every demo loads, runs, has zero console / pageerrors
+* per-demo physical invariants (volume conservation, body trajectories, depth-at-row, splash particle counts, FPS)
+* `lake-at-rest` volume drift < 0.5 % (real GPU) / 1 % (software) over 300 steps
+* dam-break wave-front ratio in [0.3, 1.6] (real) / [0.2, 1.8] (software)
+* force-accumulator round-trip — a moving chunk produces non-zero force readback
+* displacement round-trip — bed rise pushes water without losing mass
+* per-demo p50 / p95 / p99 frame-time budgets (real-GPU project only)
 
 ## Using the library
 
