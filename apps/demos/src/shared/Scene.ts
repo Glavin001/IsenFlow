@@ -6,8 +6,9 @@
  * (rasterizer → solver.step → accumulateForces → ForceReadback → Rapier).
  */
 import * as THREE from 'three';
-import { WebGPURenderer } from 'three/webgpu';
+import { WebGPURenderer, PMREMGenerator } from 'three/webgpu';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { SkyMesh } from 'three/examples/jsm/objects/SkyMesh.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 
 import {
@@ -136,10 +137,11 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
   await renderer.init();
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setClearColor(new THREE.Color(0x121a2b), 1);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.35;
+  renderer.setClearColor(new THREE.Color(0x86a4c8), 1);
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x121a2b, 30, 80);
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
   camera.position.set(14, 10, 14);
 
@@ -176,8 +178,53 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
   const hemi = new THREE.HemisphereLight(0xbfd5ff, 0x223344, 0.7);
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-  sun.position.set(40, 60, 20);
+
+  // Procedural sky + PMREM environment for water reflections.
+  const sky = new SkyMesh();
+  sky.scale.setScalar(10000);
+  sky.turbidity.value = 10;
+  sky.rayleigh.value = 2;
+  sky.mieCoefficient.value = 0.005;
+  sky.mieDirectionalG.value = 0.8;
+  scene.add(sky);
+
+  const sunDirection = new THREE.Vector3();
+  const sunPosition = new THREE.Vector3();
+  const phi = THREE.MathUtils.degToRad(90 - 8); // elevation 8°
+  const theta = THREE.MathUtils.degToRad(135); // azimuth 135°
+  sunPosition.setFromSphericalCoords(1, phi, theta);
+  sky.sunPosition.value.copy(sunPosition);
+  sunDirection.copy(sunPosition).normalize();
+
+  // Align the existing directional light with the sky's sun so shadows match.
+  sun.position.copy(sunDirection).multiplyScalar(80);
   scene.add(sun);
+
+  // Expose sun for the water material (picked up via scene.userData).
+  scene.userData.sun = sunDirection;
+
+  // PMREM-convolve the sky into an env map. We do this once at startup
+  // using a dedicated scene containing only the sky, so geometry added
+  // later doesn't bleed into the environment.
+  const pmrem = new PMREMGenerator(renderer);
+  const envScene = new THREE.Scene();
+  const skyForEnv = new SkyMesh();
+  skyForEnv.scale.setScalar(10000);
+  skyForEnv.turbidity.value = sky.turbidity.value;
+  skyForEnv.rayleigh.value = sky.rayleigh.value;
+  skyForEnv.mieCoefficient.value = sky.mieCoefficient.value;
+  skyForEnv.mieDirectionalG.value = sky.mieDirectionalG.value;
+  skyForEnv.sunPosition.value.copy(sunPosition);
+  envScene.add(skyForEnv);
+  // fromScene is async on WebGPU until the backend is ready; the helper
+  // returns a render target whose .texture we plug into scene.environment.
+  pmrem.fromSceneAsync(envScene).then((rt) => {
+    scene.environment = rt.texture;
+    scene.background = rt.texture;
+    // Sky is baked — remove the live mesh so it doesn't run atmospheric
+    // scattering per pixel every frame.
+    scene.remove(sky);
+  });
 
   const groundGeom = new THREE.PlaneGeometry(WORLD, WORLD, 1, 1);
   groundGeom.rotateX(-Math.PI / 2);
