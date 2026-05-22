@@ -11,6 +11,7 @@ import splashes from './demos/07-splash-showcase.js';
 import impact from './demos/08-impact.js';
 import cityFlood from './demos/09-city-flood.js';
 import mountainRiver from './demos/10-mountain-river.js';
+import rainStorm from './demos/11-rain-storm.js';
 
 const demos: Demo[] = [
   damBreak,
@@ -23,6 +24,7 @@ const demos: Demo[] = [
   impact,
   cityFlood,
   mountainRiver,
+  rainStorm,
 ];
 
 async function main() {
