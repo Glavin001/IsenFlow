@@ -204,6 +204,12 @@ export function applyStabilizedForces(
 /**
  * Clamp coupled body velocities after Rapier step (safety net).
  * Must be called AFTER `world.step()` to be effective.
+ *
+ * The vertical damping and `maxVy` clamp exist to suppress oscillation
+ * caused by the rasterizer↔buoyancy feedback when a body is in the water.
+ * Applying them to a body in free-fall above the water would also clamp its
+ * gravitational acceleration to ~1 m/s terminal velocity and stop it ever
+ * reaching the surface, so we gate them on actual submersion.
  */
 export function clampCoupledVelocities(
   bodies: ReadonlyMap<number, CoupledBodyInfo>,
@@ -214,10 +220,17 @@ export function clampCoupledVelocities(
   const vyDamp = opts.vyDamping ?? 0.85;
   for (const [_key, cb] of bodies) {
     const lv = cb.body.linvel();
+    const [, halfY] = cb.halfExtents;
+    const comY = cb.body.translation().y;
+    const bodyBot = comY - halfY;
+    const submerged = bodyBot < cb.waterLevelRef;
+
     const cx = clamp(lv.x, maxH);
-    // Dampen vertical velocity each frame to suppress rasterizer↔buoyancy oscillation
-    const cy = clamp(lv.y * vyDamp, maxVy);
     const cz = clamp(lv.z, maxH);
+    // Only damp/clamp vy when the body is at least touching the water
+    // surface; otherwise free-fall is preserved.
+    const cy = submerged ? clamp(lv.y * vyDamp, maxVy) : lv.y;
+
     if (lv.x !== cx || lv.y !== cy || lv.z !== cz) {
       cb.body.setLinvel({ x: cx, y: cy, z: cz }, true);
     }

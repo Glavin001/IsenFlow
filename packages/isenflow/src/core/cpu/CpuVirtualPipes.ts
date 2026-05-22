@@ -145,13 +145,6 @@ export function cpuComputeFluxes(state: CpuPipesState, params: CpuPipesParams): 
         fU = applyManning(fU, hpipeU);
       }
 
-      // CFL safety clamp: cap each flux at dx³/dt
-      const cflCap = dx * dx * dx / dt;
-      fL = Math.min(fL, cflCap);
-      fR = Math.min(fR, cflCap);
-      fD = Math.min(fD, cflCap);
-      fU = Math.min(fU, cflCap);
-
       // Outflow scaling to prevent over-drain
       const totalOut = (fL + fR + fD + fU) * dt;
       const volumeAvailable = Math.max(0, hSelf) * dx * dx;
@@ -227,25 +220,6 @@ export function cpuUpdateWater(state: CpuPipesState, params: CpuPipesParams): vo
                       hAt(water, i, j - 1, W, H) +
                       hAt(water, i, j + 1, W, H)) * 0.25;
         newH = newH + 0.1 * (mean - newH); // mix(newH, mean, 0.1)
-      }
-
-      // Anti-oscillation filter: smooth only local extrema (checkerboard spikes)
-      if ((bt === 0 || bt === 2) &&
-          inBounds(i - 1, j, W, H) && inBounds(i + 1, j, W, H) &&
-          inBounds(i, j - 1, W, H) && inBounds(i, j + 1, W, H)) {
-        const hL = hAt(water, i - 1, j, W, H);
-        const hR = hAt(water, i + 1, j, W, H);
-        const hD = hAt(water, i, j - 1, W, H);
-        const hU = hAt(water, i, j + 1, W, H);
-        const isMax = newH > hL && newH > hR && newH > hD && newH > hU;
-        const isMin = newH < hL && newH < hR && newH < hD && newH < hU;
-        if (isMax || isMin) {
-          const meanH = (hL + hR + hD + hU) * 0.25;
-          const deviation = Math.abs(newH - meanH) / Math.max(newH + meanH, 0.01);
-          if (deviation > 0.3) {
-            newH = newH + 0.1 * (meanH - newH);
-          }
-        }
       }
 
       water[ci * 2] = newH;

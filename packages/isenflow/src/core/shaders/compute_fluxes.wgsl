@@ -94,17 +94,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     ud.y = ud.y / (1.0 + params.dt * cf_U * speed_U);
   }
 
-  // CFL safety clamp: cap each flux at the volume-rate that would move one
-  // cell-width of water per timestep through the face.  This only activates
-  // when depths are extreme (h >> dx²/(g·dt²) ≈ 10 m at current params) and
-  // prevents the checkerboard blow-up that the K scaling alone can't stop
-  // (K limits outflow per cell; this limits per-face rate).
-  let cfl_cap = params.dx * params.dx * params.dx / params.dt;
-  lr.x = min(lr.x, cfl_cap);
-  lr.y = min(lr.y, cfl_cap);
-  ud.x = min(ud.x, cfl_cap);
-  ud.y = min(ud.y, cfl_cap);
-
   let total_out = (lr.x + lr.y + ud.x + ud.y) * params.dt;
   let volume_available = max(0.0, h_self) * params.dx * params.dx;
   let K = select(min(1.0, volume_available / max(total_out, 1e-9)), 0.0, h_self <= 0.0);

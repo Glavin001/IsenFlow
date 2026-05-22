@@ -233,6 +233,23 @@ describe('RapierBridge', () => {
       // -100 * 0.85 = -85, clamped to -3
       expect(body._vel.y).toBe(-3);
     });
+
+    it('preserves vy when body is above the water surface (free-fall)', () => {
+      // Body sitting well above water (y=20, halfY=0.25 → bot=19.75 > water=1.5)
+      // should not have its falling velocity clamped or damped — otherwise
+      // bodies dropped from a bridge never reach the surface in finite time.
+      const body = mockBody({
+        pos: { x: 0, y: 20, z: 0 },
+        vel: { x: 0, y: -8, z: 0 },
+      });
+      const bodies = new Map([[1, {
+        chunkId: 1, body,
+        halfExtents: [0.25, 0.25, 0.25] as [number, number, number],
+        waterLevelRef: 1.5, bedLevelRef: 0,
+      }]]);
+      clampCoupledVelocities(bodies);
+      expect(body._vel.y).toBe(-8);
+    });
   });
 
   // ---- Force cap regression test ----
