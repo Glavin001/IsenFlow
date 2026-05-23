@@ -62,6 +62,14 @@ export class SweSolver {
 
   /** Conservative state: 4 floats per cell (h, hu, hv, _pad). */
   readonly state: GPUBuffer;
+  /**
+   * Output buffer for kp_update — ping-pongs with `state` to avoid the
+   * data-race that would occur if kp_update both read and wrote `state`
+   * (WGSL does not synchronize between workgroup invocations, so an
+   * invocation reading a neighbor's state could see partial/stale data
+   * being concurrently written by that neighbor's own invocation).
+   */
+  readonly stateNext: GPUBuffer;
   /** Snapshot of `state` at the start of each step (for RK2 averaging). */
   readonly stateSnap: GPUBuffer;
   /** Slopes: 8 floats per cell (dw_x, dw_y, dhu_x, dhu_y, dhv_x, dhv_y, maxSpeed, _pad). */
@@ -115,8 +123,10 @@ export class SweSolver {
     const dev = ctx.device;
     const cells = grid.width * grid.height;
 
-    // KP state: vec4 per cell
+    // KP state: vec4 per cell — TWO state buffers for ping-pong so kp_update
+    // never reads and writes the same buffer (would race in WGSL).
     this.state     = dev.createBuffer({ size: cells * 16, usage: STORAGE_USAGE, label: 'sweKP.state' });
+    this.stateNext = dev.createBuffer({ size: cells * 16, usage: STORAGE_USAGE, label: 'sweKP.stateNext' });
     this.stateSnap = dev.createBuffer({ size: cells * 16, usage: STORAGE_USAGE, label: 'sweKP.stateSnap' });
     this.slopes    = dev.createBuffer({ size: cells * 32, usage: STORAGE_USAGE, label: 'sweKP.slopes' });
 
@@ -273,33 +283,45 @@ export class SweSolver {
     const bg = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[]) =>
       dev.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
 
-    this.cachedBindGroups.kpSlopes = bg(this.pipelines.kpSlopes!, [
+    // Two slope bind groups so each RK2 stage's slopes are computed from
+    // the correct state buffer (stage 1 from `state`, stage 2 from `stateNext`).
+    this.cachedBindGroups.kpSlopes1 = bg(this.pipelines.kpSlopes!, [
       { binding: 0, resource: { buffer: this.params } },
       { binding: 1, resource: { buffer: this.state } },
       { binding: 2, resource: { buffer: this.bed } },
       { binding: 3, resource: { buffer: this.slopes } },
     ]);
+    this.cachedBindGroups.kpSlopes2 = bg(this.pipelines.kpSlopes!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.stateNext } },
+      { binding: 2, resource: { buffer: this.bed } },
+      { binding: 3, resource: { buffer: this.slopes } },
+    ]);
 
+    // Ping-pong: stage 1 reads from `state` (= U^n), writes to `stateNext` (= U^(1)).
     this.cachedBindGroups.kpUpdate1 = bg(this.pipelines.kpUpdate!, [
       { binding: 0, resource: { buffer: this.params } },
       { binding: 1, resource: { buffer: this.stage1Params } },
-      { binding: 2, resource: { buffer: this.state } },
-      { binding: 3, resource: { buffer: this.stateSnap } },
-      { binding: 4, resource: { buffer: this.bed } },
-      { binding: 5, resource: { buffer: this.slopes } },
-      { binding: 6, resource: { buffer: this.boundary } },
-      { binding: 7, resource: { buffer: this.boundaryTargetH } },
+      { binding: 2, resource: { buffer: this.state } },       // state_in
+      { binding: 3, resource: { buffer: this.stateNext } },   // state_out
+      { binding: 4, resource: { buffer: this.stateSnap } },
+      { binding: 5, resource: { buffer: this.bed } },
+      { binding: 6, resource: { buffer: this.slopes } },
+      { binding: 7, resource: { buffer: this.boundary } },
+      { binding: 8, resource: { buffer: this.boundaryTargetH } },
     ]);
 
+    // Ping-pong: stage 2 reads from `stateNext` (= U^(1)), writes to `state` (= U^(n+1)).
     this.cachedBindGroups.kpUpdate2 = bg(this.pipelines.kpUpdate!, [
       { binding: 0, resource: { buffer: this.params } },
       { binding: 1, resource: { buffer: this.stage2Params } },
-      { binding: 2, resource: { buffer: this.state } },
-      { binding: 3, resource: { buffer: this.stateSnap } },
-      { binding: 4, resource: { buffer: this.bed } },
-      { binding: 5, resource: { buffer: this.slopes } },
-      { binding: 6, resource: { buffer: this.boundary } },
-      { binding: 7, resource: { buffer: this.boundaryTargetH } },
+      { binding: 2, resource: { buffer: this.stateNext } },   // state_in
+      { binding: 3, resource: { buffer: this.state } },       // state_out
+      { binding: 4, resource: { buffer: this.stateSnap } },
+      { binding: 5, resource: { buffer: this.bed } },
+      { binding: 6, resource: { buffer: this.slopes } },
+      { binding: 7, resource: { buffer: this.boundary } },
+      { binding: 8, resource: { buffer: this.boundaryTargetH } },
     ]);
 
     this.cachedBindGroups.kpRefreshViews = bg(this.pipelines.kpRefreshViews!, [
@@ -367,14 +389,15 @@ export class SweSolver {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'sweKP.step' });
 
     for (let s = 0; s < this.opts.substepsPerFrame; s++) {
-      // Snapshot U^n → stateSnap
+      // Snapshot U^n → stateSnap.  After this, state still holds U^n.
       encoder.copyBufferToBuffer(this.state, 0, this.stateSnap, 0, this.state.size);
 
       // -------- Stage 1: U^(1) = U^n + Δt·L(U^n) --------
+      //   slopes computed from state (= U^n); update reads state, writes stateNext.
       {
         const pass = encoder.beginComputePass({ label: 'kpSlopes-1' });
         pass.setPipeline(this.pipelines.kpSlopes!);
-        pass.setBindGroup(0, this.cachedBindGroups.kpSlopes!);
+        pass.setBindGroup(0, this.cachedBindGroups.kpSlopes1!);
         pass.dispatchWorkgroups(gx, gy, 1);
         pass.end();
       }
@@ -387,10 +410,11 @@ export class SweSolver {
       }
 
       // -------- Stage 2: U^{n+1} = ½U^n + ½(U^(1) + Δt·L(U^(1))) --------
+      //   slopes computed from stateNext (= U^(1)); update reads stateNext, writes state.
       {
         const pass = encoder.beginComputePass({ label: 'kpSlopes-2' });
         pass.setPipeline(this.pipelines.kpSlopes!);
-        pass.setBindGroup(0, this.cachedBindGroups.kpSlopes!);
+        pass.setBindGroup(0, this.cachedBindGroups.kpSlopes2!);
         pass.dispatchWorkgroups(gx, gy, 1);
         pass.end();
       }
@@ -616,6 +640,7 @@ export class SweSolver {
     const zero8 = new Float32Array(cells * 8);
     const zero2 = new Float32Array(cells * 2);
     this.ctx.queue.writeBuffer(this.state, 0, zero4);
+    this.ctx.queue.writeBuffer(this.stateNext, 0, zero4);
     this.ctx.queue.writeBuffer(this.stateSnap, 0, zero4);
     this.ctx.queue.writeBuffer(this.slopes, 0, zero8);
     this.ctx.queue.writeBuffer(this.water, 0, zero2);
@@ -822,7 +847,7 @@ export class SweSolver {
 
   destroy(): void {
     for (const b of [
-      this.state, this.stateSnap, this.slopes,
+      this.state, this.stateNext, this.stateSnap, this.slopes,
       this.bed, this.water, this.velocity,
       this.chunkId, this.chunkVel, this.boundary, this.boundaryTargetH,
       this.prevBed, this.hDelta,

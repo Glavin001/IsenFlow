@@ -30,14 +30,21 @@ struct KpStageParams {
   _pad3: f32,
 };
 
+// IMPORTANT: read state INPUT from `state_in` and write state OUTPUT to
+// `state_out` — these MUST be different buffers, otherwise neighbour reads
+// race with this invocation's own write (WGSL has no inter-invocation
+// synchronisation within a single dispatch, so the result would be
+// non-deterministic and look like spike instability).  The host code
+// ping-pongs the buffer roles between RK2 stages.
 @group(0) @binding(0) var<uniform> params: SimParams;
 @group(0) @binding(1) var<uniform> stage:  KpStageParams;
-@group(0) @binding(2) var<storage, read_write> state:    array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read>       state_snap: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read>       bed:      array<f32>;
-@group(0) @binding(5) var<storage, read_write> slopes:   array<f32>;
-@group(0) @binding(6) var<storage, read>       boundary: array<u32>;
-@group(0) @binding(7) var<storage, read>       boundaryTargetH: array<f32>;
+@group(0) @binding(2) var<storage, read>       state_in:  array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> state_out: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read>       state_snap: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read>       bed:      array<f32>;
+@group(0) @binding(6) var<storage, read_write> slopes:   array<f32>;
+@group(0) @binding(7) var<storage, read>       boundary: array<u32>;
+@group(0) @binding(8) var<storage, read>       boundaryTargetH: array<f32>;
 
 fn read_slope_dw_x(c: u32) -> f32 { return slopes[c * 8u + 0u]; }
 fn read_slope_dw_y(c: u32) -> f32 { return slopes[c * 8u + 1u]; }
@@ -84,11 +91,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let c = cell_idx(p.x, p.y, W);
 
   let bt = boundary[c];
-  let s = state[c];
+  let s = state_in[c];
 
   // SOLID: pin to zero, skip all flux
   if (bt == KP_BT_SOLID) {
-    state[c] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    state_out[c] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     slopes[c * 8u + 6u] = 0.0;
     return;
   }
@@ -131,7 +138,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dhu_x_N: f32 = 0.0;
     var dhv_x_N: f32 = 0.0;
     if (inside && !neighborIsSolid) {
-      sN = state[cN];
+      sN = state_in[cN];
       bN = bed[cN * 2u + 1u];
       dw_x_N  = read_slope_dw_x(cN);
       dhu_x_N = read_slope_dhu_x(cN);
@@ -183,7 +190,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dhu_x_N: f32 = 0.0;
     var dhv_x_N: f32 = 0.0;
     if (inside && !neighborIsSolid) {
-      sN = state[cN];
+      sN = state_in[cN];
       bN = bed[cN * 2u + 1u];
       dw_x_N  = read_slope_dw_x(cN);
       dhu_x_N = read_slope_dhu_x(cN);
@@ -234,7 +241,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dhu_y_N: f32 = 0.0;
     var dhv_y_N: f32 = 0.0;
     if (inside && !neighborIsSolid) {
-      sN = state[cN];
+      sN = state_in[cN];
       bN = bed[cN * 2u + 1u];
       dw_y_N  = read_slope_dw_y(cN);
       dhu_y_N = read_slope_dhu_y(cN);
@@ -283,7 +290,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dhu_y_N: f32 = 0.0;
     var dhv_y_N: f32 = 0.0;
     if (inside && !neighborIsSolid) {
-      sN = state[cN];
+      sN = state_in[cN];
       bN = bed[cN * 2u + 1u];
       dw_y_N  = read_slope_dw_y(cN);
       dhu_y_N = read_slope_dhu_y(cN);
@@ -338,10 +345,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Damp momentum, blend h toward neighbor mean
     var sumH: f32 = 0.0;
     var count: f32 = 0.0;
-    if (p.x > 0)     { sumH += state[cell_idx(p.x - 1, p.y, W)].x; count += 1.0; }
-    if (p.x < W - 1) { sumH += state[cell_idx(p.x + 1, p.y, W)].x; count += 1.0; }
-    if (p.y > 0)     { sumH += state[cell_idx(p.x, p.y - 1, W)].x; count += 1.0; }
-    if (p.y < H - 1) { sumH += state[cell_idx(p.x, p.y + 1, W)].x; count += 1.0; }
+    if (p.x > 0)     { sumH += state_in[cell_idx(p.x - 1, p.y, W)].x; count += 1.0; }
+    if (p.x < W - 1) { sumH += state_in[cell_idx(p.x + 1, p.y, W)].x; count += 1.0; }
+    if (p.y > 0)     { sumH += state_in[cell_idx(p.x, p.y - 1, W)].x; count += 1.0; }
+    if (p.y < H - 1) { sumH += state_in[cell_idx(p.x, p.y + 1, W)].x; count += 1.0; }
     if (count > 0.0) {
       newState.x = newState.x + 0.1 * (sumH / count - newState.x);
     }
@@ -363,6 +370,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  state[c] = newState;
+  state_out[c] = newState;
   slopes[c * 8u + 6u] = maxSpeed;
 }
