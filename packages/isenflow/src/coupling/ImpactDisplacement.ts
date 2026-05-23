@@ -129,14 +129,17 @@ export function computeImpact(
   const ringAreaM2 = Math.PI * ((ringCells * dx) ** 2 - (craterCells * dx) ** 2);
 
   // Ring height: displaced volume spread over ring area, amplified by Fr and density.
-  // Phase-3 cap: limit at 0.5 × waterDepth so we never inject a frame-instant
-  // > waterDepth bump that would violate CFL.  KP propagates the crater and
-  // ring naturally — we don't need a 2× depth band-aid that VP required.
+  // Cap at 1.5 × waterDepth — visually impressive but well below VP's 2×
+  // band-aid (which contributed to spike artifacts).  KP solver propagates
+  // the ring + the radial momentum we inject (see `momentum` field below)
+  // as an accurate wave train, so the visual relies less on a tall instant
+  // bump.
   const rawRingH = (displacedVolume / Math.max(0.01, ringAreaM2)) * (1 + fr) * densityRatio;
-  const ringHeight = Math.min(waterDepth * 0.5, rawRingH);
+  const ringHeight = Math.min(waterDepth * 1.5, rawRingH);
 
-  // Crater depression: proportional to ring height, also capped at 0.5 × waterDepth
-  const craterDepth = Math.min(waterDepth * 0.5, ringHeight * 1.2);
+  // Crater depression: proportional to ring height, capped at 0.7 × waterDepth
+  // so we never write h ≤ 0 (which would force the cell dry and lose mass).
+  const craterDepth = Math.min(waterDepth * 0.7, ringHeight * 1.2);
 
   // Build the grid region
   const ci = Math.round((params.worldX - grid.origin[0]) / dx);
