@@ -586,10 +586,11 @@ async function diagnose(ctx: DemoContext): Promise<void> {
     let nanIdx = -1;
     let totalH = 0;
     let n = 0;
-    // Record the FIRST NaN cell's (h, hu, hv) for diagnostics — we want the
-    // actual NaN values, not whatever was in the loop variable when we hit
-    // the end.
+    // Record the FIRST NaN cell's (h, hu, hv) for diagnostics + per-cell maxima
+    // (so we can spot a single CFL-violating cell, not just bulk averages).
     let nanH = 0, nanHu = 0, nanHv = 0;
+    let maxU = 0, maxV = 0;          // desingularized velocity (m/s)
+    let cflProxy = 0;                // = (|u|+|v|+sqrt(g·h)) per cell
     if (solver.readState) {
       const s = await solver.readState();
       n = s.length / 4;
@@ -608,6 +609,17 @@ async function diagnose(ctx: DemoContext): Promise<void> {
         if (Math.abs(hu) > maxAbsHu) maxAbsHu = Math.abs(hu);
         if (Math.abs(hv) > maxAbsHv) maxAbsHv = Math.abs(hv);
         totalH += h;
+        // Desingularized velocity — same formula as the WGSL refresh kernel
+        const SQRT2 = Math.SQRT2;
+        const EPS = 1e-3;
+        const h2 = h * h, h4 = h2 * h2, eps4 = EPS * EPS * EPS * EPS;
+        const denom = Math.sqrt(h4 + Math.max(h4, eps4));
+        const u = h > 0 ? (SQRT2 * h * hu) / denom : 0;
+        const v = h > 0 ? (SQRT2 * h * hv) / denom : 0;
+        const speed = Math.abs(u) + Math.abs(v) + Math.sqrt(9.81 * Math.max(0, h));
+        if (Math.abs(u) > maxU) maxU = Math.abs(u);
+        if (Math.abs(v) > maxV) maxV = Math.abs(v);
+        if (speed > cflProxy) cflProxy = speed;
       }
     } else {
       const w = await solver.readWater();
@@ -633,8 +645,13 @@ async function diagnose(ctx: DemoContext): Promise<void> {
       console.warn(`${tag} !! SPIKE maxH=${maxH.toFixed(2)} maxHu=${maxAbsHu.toFixed(2)} maxHv=${maxAbsHv.toFixed(2)} avgH=${avgH.toFixed(2)}`);
       return;
     }
+    // CFL estimate: (|u|+|v|+c)·dt/dx ; KP needs ≤ 0.5 for stability.
+    const dx = ctx.solver.grid.dx;
+    const dt = (ctx.solver as { opts?: { dt?: number } }).opts?.dt ?? 1 / 240;
+    const cflEst = cflProxy * dt / dx;
+    const flag = cflEst > 0.5 ? ' !! CFL>' : '';
     // eslint-disable-next-line no-console
-    console.log(`${tag} maxH=${maxH.toFixed(3)} maxHu=${maxAbsHu.toFixed(3)} maxHv=${maxAbsHv.toFixed(3)} avgH=${avgH.toFixed(3)}`);
+    console.log(`${tag} maxH=${maxH.toFixed(3)} maxU=${maxU.toFixed(3)} maxV=${maxV.toFixed(3)} CFL≈${cflEst.toFixed(3)}${flag} avgH=${avgH.toFixed(3)}`);
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn('[isenflow] diagnose readback failed:', e);
