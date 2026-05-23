@@ -17,6 +17,14 @@ export const BoundaryType = {
   Inflow: 4,
   /** Sea-level clamp — h pinned to a target depth each frame. */
   Sea: 5,
+  /**
+   * Solid impermeable cell — zero flux through every face touching it; the
+   * cell itself stays at (h, hu, hv) = (0, 0, 0).  Use for building walls
+   * or other truly impermeable obstacles in the KP scheme.  This replaces
+   * the "1-cell-tall bed elevation" trick that VP relied on (and that
+   * produced spike artifacts at the wet/dry interface).
+   */
+  Solid: 6,
 } as const;
 
 export type BoundaryTypeValue = (typeof BoundaryType)[keyof typeof BoundaryType];

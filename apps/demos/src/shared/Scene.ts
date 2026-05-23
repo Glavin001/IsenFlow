@@ -14,7 +14,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import {
   acquireGPU,
   SimulationGrid,
-  VirtualPipesSolver,
+  SweSolver,
   HeightfieldRasterizer,
   SplashParticleSystem,
   ForceReadback,
@@ -57,7 +57,7 @@ export interface DemoContext {
   controls: OrbitControls;
   rapier: typeof RAPIER;
   world: RAPIER.World;
-  solver: VirtualPipesSolver;
+  solver: SweSolver;
   rasterizer: HeightfieldRasterizer;
   splashes: SplashParticleSystem;
   forceReadback: ForceReadback;
@@ -162,14 +162,22 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
     dx: WORLD / 384,
     origin: [-WORLD / 2, -WORLD / 2],
   });
-  // Internal physics tick is 1/240 s. With pipeArea=dx² (default Mei
-  // formulation) and dx≈4 cm, the effective wave speed is c≈√(g·h)
-  // ≈ 3 m/s for 1 m water. CFL margin is large.
-  const solver = new VirtualPipesSolver(gpu, grid, {
-    dt: 1 / 240,
+  // Internal physics tick is 1/960 s.  At 60 FPS, the main render loop
+  // calls solver.step() ~16 times per frame (governed by `MAX_SUBSTEPS`
+  // and `target / dtSub`), so we keep `substepsPerFrame: 1` here —
+  // setting it higher would multiply substeps by the loop's count and
+  // run the sim N× too fast.
+  //
+  // CFL = c · dt / dx.  For h up to ~10 m (transient) and dx ≈ 4 cm:
+  //   c = √(g·h) ≈ 9.9 m/s → CFL ≈ 0.26
+  // Comfortably under KP central-upwind's stability limit of 0.5 (per
+  // substep, before RK2's larger margin).  Original dt=1/240 ran at
+  // CFL ≈ 0.65 which was marginal and diverged on any 10 m+ transient.
+  const solver = new SweSolver(gpu, grid, {
+    dt: 1 / 960,
     substepsPerFrame: 1,
-    damping: 0.9,
     manningN: 0.03,
+    desingEpsilon: 1e-3,
   });
   const rasterizer = new HeightfieldRasterizer(solver);
   const splashes = new SplashParticleSystem(4000);
@@ -344,9 +352,14 @@ export async function switchDemo(ctx: DemoContext, demo: Demo): Promise<void> {
   // Fresh physics world.
   ctx.world = new ctx.rapier.World({ x: 0, y: -9.81, z: 0 });
 
-  activeDemo = demo;
+  // Stash the ctx so cleanup() can find it if we need to abort, but DON'T
+  // expose the new demo to the animation loop until setup completes — the
+  // loop would otherwise call demo.tick() against an empty scratch and
+  // crash with "Cannot read properties of undefined (reading 'update')".
+  activeDemo = null;
   activeCtx = ctx;
   await demo.setup(ctx);
+  activeDemo = demo;
 }
 
 /** Build a per-frame snapshot of all coupled bodies for the rasterizer. */
@@ -447,6 +460,19 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
       ctx.simStepMs.push(simMs);
       if (ctx.simStepMs.length > MAX_FRAME_SAMPLES) ctx.simStepMs.shift();
 
+      // DEBUG: Diagnostic logging — every 10 frames for the first 100
+      // (~1.5 s, captures spike onset), then every 60 frames after.
+      // Reports max(h), max(|u|), max(|v|), and NaN detection.
+      // Silence: set `window.__isenflow_debug = false` in the console.
+      const debugEnabled = (window as { __isenflow_debug?: boolean }).__isenflow_debug !== false;
+      const shouldDiagnose = debugEnabled && (
+        (ctx.tickCount <= 100 && ctx.tickCount % 10 === 0) ||
+        (ctx.tickCount > 100 && ctx.tickCount % 60 === 0)
+      );
+      if (shouldDiagnose) {
+        void diagnose(ctx);
+      }
+
       // 3) Body→water displacement (uses prevBed → bed delta).
       ctx.solver.applyDisplacement();
 
@@ -535,6 +561,103 @@ function percentile(arr: readonly number[], p: number): number {
   const sorted = [...arr].sort((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * sorted.length)));
   return sorted[idx]!;
+}
+
+/**
+ * Diagnostic readback — reads the conservative state (h, hu, hv) once and
+ * prints max-magnitude metrics + NaN/Inf detection to the console.  Async
+ * (uses GPU readback) and fire-and-forget — should not block the main loop.
+ *
+ * Enable/disable via `window.__isenflow_debug` (default ON).
+ *
+ * Output format:
+ *   [isenflow t=1.23 tick=72] maxH=1.32 maxU=0.85 maxV=0.41 vol=4.32  ← healthy
+ *   [isenflow t=1.23 tick=72] !! NaN at idx=12345 (h=NaN, hu=...)    ← BROKEN
+ *   [isenflow t=1.23 tick=72] !! SPIKE maxH=12.45 (> 5×expected)      ← spike
+ */
+let diagnoseInFlight = false;
+async function diagnose(ctx: DemoContext): Promise<void> {
+  if (diagnoseInFlight) return;
+  diagnoseInFlight = true;
+  try {
+    const solver = ctx.solver as { readState?: () => Promise<Float32Array>; readVelocity: () => Promise<Float32Array>; readWater: () => Promise<Float32Array> };
+    // Prefer the KP-native readState() (h, hu, hv per cell) when available.
+    let h = 0, hu = 0, hv = 0, maxH = 0, maxAbsHu = 0, maxAbsHv = 0;
+    let nanIdx = -1;
+    let totalH = 0;
+    let n = 0;
+    // Record the FIRST NaN cell's (h, hu, hv) for diagnostics + per-cell maxima
+    // (so we can spot a single CFL-violating cell, not just bulk averages).
+    let nanH = 0, nanHu = 0, nanHv = 0;
+    let maxU = 0, maxV = 0;          // desingularized velocity (m/s)
+    let cflProxy = 0;                // = (|u|+|v|+sqrt(g·h)) per cell
+    if (solver.readState) {
+      const s = await solver.readState();
+      n = s.length / 4;
+      for (let i = 0; i < n; i++) {
+        h = s[i * 4 + 0]!;
+        hu = s[i * 4 + 1]!;
+        hv = s[i * 4 + 2]!;
+        if (!Number.isFinite(h) || !Number.isFinite(hu) || !Number.isFinite(hv)) {
+          if (nanIdx < 0) {
+            nanIdx = i;
+            nanH = h; nanHu = hu; nanHv = hv;
+          }
+          continue;
+        }
+        if (h > maxH) maxH = h;
+        if (Math.abs(hu) > maxAbsHu) maxAbsHu = Math.abs(hu);
+        if (Math.abs(hv) > maxAbsHv) maxAbsHv = Math.abs(hv);
+        totalH += h;
+        // Desingularized velocity — same formula as the WGSL refresh kernel
+        const SQRT2 = Math.SQRT2;
+        const EPS = 1e-3;
+        const h2 = h * h, h4 = h2 * h2, eps4 = EPS * EPS * EPS * EPS;
+        const denom = Math.sqrt(h4 + Math.max(h4, eps4));
+        const u = h > 0 ? (SQRT2 * h * hu) / denom : 0;
+        const v = h > 0 ? (SQRT2 * h * hv) / denom : 0;
+        const speed = Math.abs(u) + Math.abs(v) + Math.sqrt(9.81 * Math.max(0, h));
+        if (Math.abs(u) > maxU) maxU = Math.abs(u);
+        if (Math.abs(v) > maxV) maxV = Math.abs(v);
+        if (speed > cflProxy) cflProxy = speed;
+      }
+    } else {
+      const w = await solver.readWater();
+      n = w.length / 2;
+      for (let i = 0; i < n; i++) {
+        h = w[i * 2]!;
+        if (!Number.isFinite(h)) { if (nanIdx < 0) nanIdx = i; continue; }
+        if (h > maxH) maxH = h;
+        totalH += h;
+      }
+    }
+    const avgH = totalH / Math.max(1, n);
+    const tag = `[isenflow t=${ctx.simTime.toFixed(2)} tick=${ctx.tickCount}]`;
+    if (nanIdx >= 0) {
+      const ix = nanIdx % (ctx.solver.grid.width);
+      const iy = Math.floor(nanIdx / ctx.solver.grid.width);
+      // eslint-disable-next-line no-console
+      console.error(`${tag} !! NaN at idx=${nanIdx} (i=${ix}, j=${iy}) h=${nanH} hu=${nanHu} hv=${nanHv}`);
+      return;
+    }
+    if (maxH > 10) {
+      // eslint-disable-next-line no-console
+      console.warn(`${tag} !! SPIKE maxH=${maxH.toFixed(2)} maxHu=${maxAbsHu.toFixed(2)} maxHv=${maxAbsHv.toFixed(2)} avgH=${avgH.toFixed(2)}`);
+      return;
+    }
+    // CFL estimate: (|u|+|v|+c)·dt/dx ; KP needs ≤ 0.5 for stability.
+    const dx = ctx.solver.grid.dx;
+    const dt = (ctx.solver as { opts?: { dt?: number } }).opts?.dt ?? 1 / 240;
+    const cflEst = cflProxy * dt / dx;
+    const flag = cflEst > 0.5 ? ' !! CFL>' : '';
+    // eslint-disable-next-line no-console
+    console.log(`${tag} maxH=${maxH.toFixed(3)} maxU=${maxU.toFixed(3)} maxV=${maxV.toFixed(3)} CFL≈${cflEst.toFixed(3)}${flag} avgH=${avgH.toFixed(3)}`);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('[isenflow] diagnose readback failed:', e);
+  } finally {
+    diagnoseInFlight = false;
+  }
 }
 
 function showError(err: Error): void {

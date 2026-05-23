@@ -10,6 +10,9 @@ const DEMOS = [
   '07-splash',
   '08-impact',
   '09-city-flood',
+  '10-mountain-river',
+  '11-rain-storm',
+  '12-stress-test',
 ];
 
 test('demo selector lists all demos', async ({ page }) => {

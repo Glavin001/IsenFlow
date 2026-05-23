@@ -1,6 +1,13 @@
 import type { VirtualPipesSolver } from '../core/VirtualPipesSolver.js';
+import type { SweSolver } from '../core/SweSolver.js';
 import type { Aabb2 } from '../utils/gridMath.js';
 import { clipAabbToGrid } from '../utils/gridMath.js';
+
+/**
+ * Either solver type — both expose the same write/clear helpers consumed
+ * by the rasterizer.  Lets demos pick either VP (legacy) or KP (new).
+ */
+type AnySolver = VirtualPipesSolver | SweSolver;
 
 export interface BoxObstacle {
   aabb: Aabb2;
@@ -33,7 +40,7 @@ export interface DynamicBodyDescriptor {
 export class HeightfieldRasterizer {
   private readonly lastFootprints = new Map<number, { x: number; y: number; w: number; h: number }>();
 
-  constructor(public readonly solver: VirtualPipesSolver) {}
+  constructor(public readonly solver: AnySolver) {}
 
   /**
    * Stamp a single rectangular obstacle into the bed by taking max with the

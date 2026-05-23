@@ -12,6 +12,7 @@ import impact from './demos/08-impact.js';
 import cityFlood from './demos/09-city-flood.js';
 import mountainRiver from './demos/10-mountain-river.js';
 import rainStorm from './demos/11-rain-storm.js';
+import stressTest from './demos/12-stress-test.js';
 
 const demos: Demo[] = [
   damBreak,
@@ -25,6 +26,7 @@ const demos: Demo[] = [
   cityFlood,
   mountainRiver,
   rainStorm,
+  stressTest,
 ];
 
 async function main() {

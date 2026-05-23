@@ -6,6 +6,8 @@ export { SimulationGrid } from './core/SimulationGrid.js';
 export type { SimulationGridOptions } from './core/SimulationGrid.js';
 export { VirtualPipesSolver } from './core/VirtualPipesSolver.js';
 export type { SolverOptions } from './core/VirtualPipesSolver.js';
+export { SweSolver } from './core/SweSolver.js';
+export type { SweSolverOptions } from './core/SweSolver.js';
 
 export { HeightfieldRasterizer } from './coupling/HeightfieldRasterizer.js';
 export type { BoxObstacle, DynamicBodyDescriptor } from './coupling/HeightfieldRasterizer.js';
