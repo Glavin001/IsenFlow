@@ -260,6 +260,7 @@ export class SweSolver {
     this.pipelines.kpSlopes = make('kpSlopes', ShaderSource.kpSlopes);
     this.pipelines.kpUpdate = make('kpUpdate', ShaderSource.kpUpdate);
     this.pipelines.kpRefreshViews = make('kpRefreshViews', ShaderSource.kpRefreshViews);
+    this.pipelines.kpSyncState = make('kpSyncState', ShaderSource.kpSyncState);
     this.pipelines.displace = make('displace', ShaderSource.applyDisplacement);
     this.pipelines.foldDelta = make('foldDelta', ShaderSource.foldHDelta);
     this.pipelines.snapshot = make('snapshot', ShaderSource.snapshotBed);
@@ -307,6 +308,12 @@ export class SweSolver {
       { binding: 2, resource: { buffer: this.water } },
       { binding: 3, resource: { buffer: this.velocity } },
       { binding: 4, resource: { buffer: this.stateSnap } },
+    ]);
+
+    this.cachedBindGroups.kpSyncState = bg(this.pipelines.kpSyncState!, [
+      { binding: 0, resource: { buffer: this.params } },
+      { binding: 1, resource: { buffer: this.water } },
+      { binding: 2, resource: { buffer: this.state } },
     ]);
 
     this.cachedBindGroups.displace = bg(this.pipelines.displace!, [
@@ -410,7 +417,14 @@ export class SweSolver {
     this.ctx.queue.submit([encoder.finish()]);
   }
 
-  /** Body→water displacement (unchanged from VP). */
+  /**
+   * Body→water displacement.  The displace+foldDelta passes modify the
+   * legacy `water` buffer based on bed changes from rasterized dynamic
+   * bodies.  KP's authoritative state is `state`, so we end with a
+   * kpSyncState pass that copies water.x → state.x — without this, the
+   * displacement is silently lost on the next step (since kp_update
+   * reads from `state`, not from `water`).
+   */
   applyDisplacement(): void {
     const encoder = this.ctx.device.createCommandEncoder({ label: 'sweKP.displace' });
     const gx = Math.ceil(this.grid.width / 8);
@@ -433,6 +447,16 @@ export class SweSolver {
     passS.setBindGroup(0, this.cachedBindGroups.snapshot!);
     passS.dispatchWorkgroups(gx, gy, 1);
     passS.end();
+
+    // KP-specific: push the displacement-induced h change back into the
+    // conservative state buffer.  Without this, the next solver step
+    // would not see the body's effect on the water surface.
+    const passSync = encoder.beginComputePass({ label: 'kpSyncState' });
+    passSync.setPipeline(this.pipelines.kpSyncState!);
+    passSync.setBindGroup(0, this.cachedBindGroups.kpSyncState!);
+    passSync.dispatchWorkgroups(gx, gy, 1);
+    passSync.end();
+
     this.ctx.queue.submit([encoder.finish()]);
   }
 

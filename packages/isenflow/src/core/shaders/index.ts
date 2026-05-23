@@ -13,6 +13,7 @@ import kpCommonSrc from './kp/kp_common.wgsl?raw';
 import kpSlopesSrc from './kp/kp_slopes.wgsl?raw';
 import kpUpdateSrc from './kp/kp_update.wgsl?raw';
 import kpRefreshSrc from './kp/kp_refresh_views.wgsl?raw';
+import kpSyncSrc from './kp/kp_sync_state.wgsl?raw';
 
 /** Concatenate `common.wgsl` with a kernel — replaces a real #include. */
 function withCommon(src: string): string {
@@ -37,4 +38,5 @@ export const ShaderSource = {
   kpSlopes:       withKpCommon(kpSlopesSrc),
   kpUpdate:       withKpCommon(kpUpdateSrc),
   kpRefreshViews: withCommon(kpRefreshSrc),
+  kpSyncState:    withCommon(kpSyncSrc),
 } as const;
