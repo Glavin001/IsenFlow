@@ -52,6 +52,14 @@ export interface ImpactResult {
 export interface ComputedImpact extends ImpactResult {
   /** Absolute water depth values for the region (row-major). */
   values: Float32Array;
+  /**
+   * Per-cell outward radial momentum (hu, hv) for the region (row-major,
+   * 2 floats per cell — hu then hv).  When applied to a momentum-aware
+   * solver (KP), this drives the wave outward physically rather than
+   * relying on h alone to do the work.  VP-compatible callers can ignore
+   * this field.
+   */
+  momentum: Float32Array;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,12 +128,15 @@ export function computeImpact(
   // Ring area (annular, in m²)
   const ringAreaM2 = Math.PI * ((ringCells * dx) ** 2 - (craterCells * dx) ** 2);
 
-  // Ring height: displaced volume spread over ring area, amplified by Fr and density
+  // Ring height: displaced volume spread over ring area, amplified by Fr and density.
+  // Phase-3 cap: limit at 0.5 × waterDepth so we never inject a frame-instant
+  // > waterDepth bump that would violate CFL.  KP propagates the crater and
+  // ring naturally — we don't need a 2× depth band-aid that VP required.
   const rawRingH = (displacedVolume / Math.max(0.01, ringAreaM2)) * (1 + fr) * densityRatio;
-  const ringHeight = Math.min(waterDepth * 2, rawRingH);
+  const ringHeight = Math.min(waterDepth * 0.5, rawRingH);
 
-  // Crater depression: proportional to ring height
-  const craterDepth = Math.min(waterDepth * 0.8, ringHeight * 1.2);
+  // Crater depression: proportional to ring height, also capped at 0.5 × waterDepth
+  const craterDepth = Math.min(waterDepth * 0.5, ringHeight * 1.2);
 
   // Build the grid region
   const ci = Math.round((params.worldX - grid.origin[0]) / dx);
@@ -140,6 +151,14 @@ export function computeImpact(
   const h = y1 - y0;
 
   const values = new Float32Array(w * h);
+  const momentum = new Float32Array(w * h * 2);
+
+  // Reference momentum magnitude: enough to give the ring water an outward
+  // velocity comparable to √(g · ringHeight) — the natural shallow-water
+  // wave speed at the perturbation amplitude.  This injects "real" kinetic
+  // energy that the KP solver propagates radially as a true wave.
+  const refSpeed = Math.sqrt(GRAVITY * Math.max(0.01, ringHeight));
+  const momentumScale = refSpeed * (waterDepth + ringHeight) * Math.min(2, fr);
 
   for (let dj = 0; dj < h; dj++) {
     for (let di = 0; di < w; di++) {
@@ -148,24 +167,36 @@ export function computeImpact(
       const r = Math.hypot(gx, gy); // in cells
 
       let depth = waterDepth;
+      let radialMomentum = 0;
 
       if (r < craterCells) {
-        // Crater zone: cosine-bell depression
+        // Crater zone: cosine-bell depression, slight INWARD momentum
+        // (water collapsing into the crater)
         const t = r / Math.max(1, craterCells);
         depth = Math.max(0.01, waterDepth - craterDepth * 0.5 * (1 + Math.cos(Math.PI * t)));
+        radialMomentum = -0.2 * momentumScale * Math.sin(Math.PI * t);
       } else if (r < ringCells) {
-        // Ring zone: cosine-bell elevation
+        // Ring zone: cosine-bell elevation + OUTWARD momentum
         const t = (r - craterCells) / Math.max(1, ringCells - craterCells);
         depth = waterDepth + ringHeight * 0.5 * (1 + Math.cos(Math.PI * t));
+        radialMomentum = momentumScale * 0.5 * (1 + Math.cos(Math.PI * t));
       }
 
       values[dj * w + di] = depth;
+
+      // Convert radial momentum to (hu, hv) components
+      const dist = Math.max(1e-6, r);
+      const dirX = gx / dist;
+      const dirY = gy / dist;
+      momentum[(dj * w + di) * 2 + 0] = radialMomentum * dirX;
+      momentum[(dj * w + di) * 2 + 1] = radialMomentum * dirY;
     }
   }
 
   return {
     region: { x: x0, y: y0, w, h },
     values,
+    momentum,
     ringHeight,
     craterDepth,
     froude: fr,
@@ -180,15 +211,29 @@ export function computeImpact(
 interface SolverLike {
   readonly grid: { width: number; height: number; dx: number; origin: readonly [number, number] };
   writeWaterRegion(region: { x: number; y: number; w: number; h: number }, values: Float32Array): void;
+  /**
+   * Optional: KP-aware solvers also accept momentum injection so impacts
+   * radiate as true waves rather than relying on h alone.  VP solvers
+   * omit this method; we fall back to height-only injection.
+   */
+  injectMomentumRegion?(
+    region: { x: number; y: number; w: number; h: number },
+    momentum: Float32Array,
+  ): void;
 }
 
 /**
  * Apply an impact to the water surface in one shot.
  * The SWE solver propagates the resulting crater + ring as waves.
+ * On KP solvers (with `injectMomentumRegion`), the impact also delivers
+ * accurate outward radial momentum so the wave radiates physically.
  */
 export function applyImpact(solver: SolverLike, params: ImpactParams): ImpactResult {
   const computed = computeImpact(params, solver.grid);
   solver.writeWaterRegion(computed.region, computed.values);
+  if (solver.injectMomentumRegion) {
+    solver.injectMomentumRegion(computed.region, computed.momentum);
+  }
   return {
     region: computed.region,
     ringHeight: computed.ringHeight,

@@ -382,13 +382,18 @@ function placeBuilding(ctx: Parameters<Demo['setup']>[0], b: Building) {
   const spanW = 2 * b.halfW + 1;
   const spanH = 2 * halfH + 1;
 
+  // Solid-mask aware solver?  KP's SweSolver exposes markSolidRegion; the
+  // legacy VP solver does not.  When available, mark NON-GAP wall cells as
+  // Solid (zero flux through the wall faces — eliminates the wet/dry spike
+  // pathology that VP suffered).  Gap cells stay as raised bed (sill).
+  const supportsSolid = typeof (ctx.solver as { markSolidRegion?: unknown }).markSolidRegion === 'function';
+
   const writeWall = (
     x: number, y: number, w: number, h: number,
     axis: 'x' | 'y',
     gapStart?: number, gapEnd?: number, sillH = 0,
   ) => {
     const buf = new Float32Array(w * h);
-    const len = axis === 'x' ? w : h;
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const along = axis === 'x' ? i : j;
@@ -398,6 +403,24 @@ function placeBuilding(ctx: Parameters<Demo['setup']>[0], b: Building) {
       }
     }
     ctx.solver.writeBedRegion({ x, y, w, h }, buf);
+
+    // Stamp Solid on the non-gap cells so KP treats them as impermeable
+    // walls (not just tall water).  Sill cells (gap) stay as bed only.
+    if (supportsSolid) {
+      const ms = (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion;
+      if (gapStart === undefined || gapEnd === undefined) {
+        ms({ x, y, w, h });
+      } else {
+        // Mark the two non-gap segments along the wall axis
+        if (axis === 'x') {
+          if (gapStart > 0) ms({ x, y, w: gapStart, h });
+          if (gapEnd < w) ms({ x: x + gapEnd, y, w: w - gapEnd, h });
+        } else {
+          if (gapStart > 0) ms({ x, y, w, h: gapStart });
+          if (gapEnd < h) ms({ x, y: y + gapEnd, w, h: h - gapEnd });
+        }
+      }
+    }
   };
 
   const opening = b.opening;
