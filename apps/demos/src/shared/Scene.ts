@@ -29,6 +29,7 @@ import {
 } from 'isenflow';
 
 import { installTestBridge, updateTestBridge } from './testBridge.js';
+import { DebugOverlay } from './DebugOverlay.js';
 
 /** A coupled body: a Rapier rigid body + its grid footprint. */
 export interface CoupledBody {
@@ -113,6 +114,7 @@ export interface Demo {
 let activeDemo: Demo | null = null;
 let activeCtx: DemoContext | null = null;
 let resetChunkCounter: () => void = () => {};
+let debugOverlay: DebugOverlay | null = null;
 
 const MAX_FRAME_SAMPLES = 600;
 
@@ -296,12 +298,19 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
     },
   };
 
+  // Debug overlay (bed elevation / water depth heat maps).
+  // Available for every demo via D key or button — no per-demo setup needed.
+  debugOverlay = new DebugOverlay(solver);
+
   installTestBridge(ctx);
   return ctx;
 }
 
 export async function switchDemo(ctx: DemoContext, demo: Demo): Promise<void> {
   if (activeDemo?.cleanup && activeCtx) activeDemo.cleanup(activeCtx);
+
+  // Uninstall debug overlay from previous demo's scene.
+  if (debugOverlay) debugOverlay.uninstall(ctx.scene);
 
   // Remove all demo-owned scene objects.
   for (const obj of [...ctx.scene.children]) {
@@ -347,6 +356,9 @@ export async function switchDemo(ctx: DemoContext, demo: Demo): Promise<void> {
   activeDemo = demo;
   activeCtx = ctx;
   await demo.setup(ctx);
+
+  // Reinstall debug overlay for the new demo.
+  if (debugOverlay) debugOverlay.install(ctx.scene);
 }
 
 /** Build a per-frame snapshot of all coupled bodies for the rasterizer. */
@@ -489,7 +501,8 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
       // 7) Sync visual meshes to physics state.
       syncMeshes(ctx);
 
-      // 8) Particles + render.
+      // 8) Debug overlay + particles + render.
+      if (debugOverlay) debugOverlay.update();
       ctx.splashes.tick(dt);
       ctx.renderer.render(ctx.scene, ctx.camera);
 
