@@ -345,9 +345,14 @@ export async function switchDemo(ctx: DemoContext, demo: Demo): Promise<void> {
   // Fresh physics world.
   ctx.world = new ctx.rapier.World({ x: 0, y: -9.81, z: 0 });
 
-  activeDemo = demo;
+  // Stash the ctx so cleanup() can find it if we need to abort, but DON'T
+  // expose the new demo to the animation loop until setup completes — the
+  // loop would otherwise call demo.tick() against an empty scratch and
+  // crash with "Cannot read properties of undefined (reading 'update')".
+  activeDemo = null;
   activeCtx = ctx;
   await demo.setup(ctx);
+  activeDemo = demo;
 }
 
 /** Build a per-frame snapshot of all coupled bodies for the rasterizer. */
