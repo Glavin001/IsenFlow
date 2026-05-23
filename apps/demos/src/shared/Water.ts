@@ -35,7 +35,10 @@ import {
   mul,
   smoothstep,
 } from 'three/tsl';
-import type { VirtualPipesSolver } from 'isenflow';
+import type { VirtualPipesSolver, SweSolver } from 'isenflow';
+
+/** Accepts either solver — they expose the same readWater/readBed/grid API. */
+type AnySolver = VirtualPipesSolver | SweSolver;
 
 const READBACK_ERROR_THRESHOLD = 5;
 
@@ -74,7 +77,7 @@ export class WaterSurface {
   private _pendingEnv: THREE.Texture | null = null;
   private _lastWiredEnv: THREE.Texture | null = null;
 
-  constructor(private readonly solver: VirtualPipesSolver) {
+  constructor(private readonly solver: AnySolver) {
     const g = solver.grid;
     this.geom = new THREE.PlaneGeometry(g.width * g.dx, g.height * g.dx, g.width, g.height);
     this.geom.rotateX(-Math.PI / 2);

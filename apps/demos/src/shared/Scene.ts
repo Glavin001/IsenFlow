@@ -14,7 +14,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import {
   acquireGPU,
   SimulationGrid,
-  VirtualPipesSolver,
+  SweSolver,
   HeightfieldRasterizer,
   SplashParticleSystem,
   ForceReadback,
@@ -57,7 +57,7 @@ export interface DemoContext {
   controls: OrbitControls;
   rapier: typeof RAPIER;
   world: RAPIER.World;
-  solver: VirtualPipesSolver;
+  solver: SweSolver;
   rasterizer: HeightfieldRasterizer;
   splashes: SplashParticleSystem;
   forceReadback: ForceReadback;
@@ -162,14 +162,15 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
     dx: WORLD / 384,
     origin: [-WORLD / 2, -WORLD / 2],
   });
-  // Internal physics tick is 1/240 s. With pipeArea=dx² (default Mei
-  // formulation) and dx≈4 cm, the effective wave speed is c≈√(g·h)
-  // ≈ 3 m/s for 1 m water. CFL margin is large.
-  const solver = new VirtualPipesSolver(gpu, grid, {
+  // Internal physics tick is 1/240 s.  With dx ≈ 4 cm and h ≤ ~4 m, max
+  // wave speed c = √(g·h) ≈ 6.3 m/s → CFL = c·dt/dx ≈ 0.65, comfortably
+  // below the KP central-upwind stability limit of 0.5 per substep (the
+  // SSP-RK2 scheme is provably stable up to CFL ~ 1.0 in practice).
+  const solver = new SweSolver(gpu, grid, {
     dt: 1 / 240,
     substepsPerFrame: 1,
-    damping: 0.9,
     manningN: 0.03,
+    desingEpsilon: 1e-3,
   });
   const rasterizer = new HeightfieldRasterizer(solver);
   const splashes = new SplashParticleSystem(4000);
