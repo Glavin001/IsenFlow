@@ -681,57 +681,43 @@ export class SweSolver {
   }
 
   /**
-   * Inject momentum (hu, hv) into a region.  Adds to existing momentum
-   * rather than replacing — so multiple source overlap correctly.  Used
-   * by `applyImpact` to deliver outward radial momentum at impact sites
-   * so KP radiates a true wave (instead of relying solely on the height
-   * perturbation to drive flow).
+   * Write a region of the conservative state (h, hu, hv, _pad) per cell.
+   * `state` is row-major, 4 floats per cell.  Used by KP-aware callers
+   * like `applyImpact` to inject crater + ring + outward momentum in
+   * one go, so KP radiates a true wave train physically.
    *
-   * `momentum` layout: row-major, 2 floats per cell (hu, hv).
+   * Writes are issued per-row (one writeBuffer per row), so the cost is
+   * O(region.h) GPU buffer writes — efficient even for large regions.
+   *
+   * Also mirrors h into the legacy `water` buffer so consumers reading
+   * `water` before the next step's refresh-views pass see the new h.
    */
-  injectMomentumRegion(
+  writeStateRegion(
     region: { x: number; y: number; w: number; h: number },
-    momentum: Float32Array,
+    state: Float32Array,
   ): void {
-    if (momentum.length !== region.w * region.h * 2) {
-      throw new Error('injectMomentumRegion: length mismatch');
+    if (state.length !== region.w * region.h * 4) {
+      throw new Error('writeStateRegion: length mismatch');
     }
-    // Read existing state for the region, add the new momentum, write back.
-    // This is async/expensive on the GPU (round-trip), so this method is
-    // intended for occasional impulse events, not per-frame use.
-    void this.readStateRegion(region).then((current) => {
-      const out = new Float32Array(region.w * region.h * 4);
-      for (let i = 0; i < region.w * region.h; i++) {
-        out[i * 4 + 0] = current[i * 4 + 0]!;                                 // h (unchanged)
-        out[i * 4 + 1] = current[i * 4 + 1]! + momentum[i * 2 + 0]!;          // hu += dHu
-        out[i * 4 + 2] = current[i * 4 + 2]! + momentum[i * 2 + 1]!;          // hv += dHv
-        out[i * 4 + 3] = 0;
-      }
-      this.writeStateRegionRaw(region, out);
-    });
-  }
-
-  /** Internal: read a region of the conservative state (4 floats per cell). */
-  private async readStateRegion(
-    region: { x: number; y: number; w: number; h: number },
-  ): Promise<Float32Array> {
+    this.writeStateRegionRaw(region, state);
+    // Mirror h into the legacy water view
+    const water = new Float32Array(region.w * region.h * 2);
+    for (let i = 0; i < region.w * region.h; i++) {
+      water[i * 2 + 0] = state[i * 4 + 0]!;
+      water[i * 2 + 1] = state[i * 4 + 0]!;
+    }
     const W = this.grid.width;
-    const rowBytes = region.w * 16;
-    const dst = this.ctx.device.createBuffer({
-      size: region.w * region.h * 16,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const enc = this.ctx.device.createCommandEncoder();
     for (let row = 0; row < region.h; row++) {
-      const srcOffset = ((region.y + row) * W + region.x) * 16;
-      enc.copyBufferToBuffer(this.state, srcOffset, dst, row * rowBytes, rowBytes);
+      const rowOffsetCells = (region.y + row) * W + region.x;
+      const slice = water.subarray(row * region.w * 2, (row + 1) * region.w * 2);
+      this.ctx.queue.writeBuffer(
+        this.water,
+        rowOffsetCells * 2 * 4,
+        slice.buffer,
+        slice.byteOffset,
+        slice.byteLength,
+      );
     }
-    this.ctx.queue.submit([enc.finish()]);
-    await dst.mapAsync(GPUMapMode.READ);
-    const out = new Float32Array(dst.getMappedRange().slice(0));
-    dst.unmap();
-    dst.destroy();
-    return out;
   }
 
   /** Internal: stamp raw state values (vec4 per cell) into a region. */

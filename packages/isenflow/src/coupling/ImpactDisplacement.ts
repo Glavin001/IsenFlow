@@ -218,24 +218,42 @@ interface SolverLike {
    * Optional: KP-aware solvers also accept momentum injection so impacts
    * radiate as true waves rather than relying on h alone.  VP solvers
    * omit this method; we fall back to height-only injection.
+   *
+   * `state` is packed (h, hu, hv, _pad) per cell (length = region.w·region.h·4).
    */
-  injectMomentumRegion?(
+  writeStateRegion?(
     region: { x: number; y: number; w: number; h: number },
-    momentum: Float32Array,
+    state: Float32Array,
   ): void;
 }
 
 /**
  * Apply an impact to the water surface in one shot.
  * The SWE solver propagates the resulting crater + ring as waves.
- * On KP solvers (with `injectMomentumRegion`), the impact also delivers
+ * On KP solvers (with `writeStateRegion`), the impact also delivers
  * accurate outward radial momentum so the wave radiates physically.
  */
 export function applyImpact(solver: SolverLike, params: ImpactParams): ImpactResult {
   const computed = computeImpact(params, solver.grid);
-  solver.writeWaterRegion(computed.region, computed.values);
-  if (solver.injectMomentumRegion) {
-    solver.injectMomentumRegion(computed.region, computed.momentum);
+  if (solver.writeStateRegion) {
+    // KP path: write (h, hu, hv, 0) packed per cell — single writeBuffer per row.
+    const w = computed.region.w;
+    const h = computed.region.h;
+    const state = new Float32Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      state[i * 4 + 0] = computed.values[i]!;             // h
+      state[i * 4 + 1] = computed.momentum[i * 2 + 0]!;   // hu
+      state[i * 4 + 2] = computed.momentum[i * 2 + 1]!;   // hv
+      // state[i*4 + 3] = 0
+    }
+    solver.writeStateRegion(computed.region, state);
+    // Also mirror the depth into the legacy `water` buffer for consumers
+    // (renderer, accumulate_forces) that read it before the next step's
+    // refresh-views pass.
+    solver.writeWaterRegion(computed.region, computed.values);
+  } else {
+    // VP fallback: depth-only injection (no momentum).
+    solver.writeWaterRegion(computed.region, computed.values);
   }
   return {
     region: computed.region,
