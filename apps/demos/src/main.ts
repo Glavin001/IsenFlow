@@ -9,6 +9,7 @@ import cascading from './demos/06-cascading-destruction.js';
 import splashes from './demos/07-splash-showcase.js';
 import impact from './demos/08-impact.js';
 import cityFlood from './demos/09-city-flood.js';
+import mountainTerrain from './demos/10-mountain-terrain.js';
 
 const demos: Demo[] = [
   damBreak,
@@ -20,6 +21,7 @@ const demos: Demo[] = [
   splashes,
   impact,
   cityFlood,
+  mountainTerrain,
 ];
 
 async function main() {
