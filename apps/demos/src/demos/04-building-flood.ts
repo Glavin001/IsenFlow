@@ -29,11 +29,23 @@ const demo: Demo = {
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xc0a070 });
     const borderMat = new THREE.MeshStandardMaterial({ color: 0x8a7558, roughness: 1 });
 
+    // KP's SweSolver exposes markSolidRegion; if present, mark wall cells as
+    // impermeable Solid (zero flux through faces touching them) — this avoids
+    // the wet/dry numerical pathology when a 2.5 m tide overtops a 1.0–1.5 m
+    // bed-wall (tiny h with non-zero hu → desingularization explodes u → CFL
+    // violation → NaN).  Door / breach cells stay as bed only.
+    const supportsSolid =
+      typeof (ctx.solver as { markSolidRegion?: unknown }).markSolidRegion === 'function';
+    const markSolid = (r: { x: number; y: number; w: number; h: number }) => {
+      if (supportsSolid) {
+        (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void })
+          .markSolidRegion(r);
+      }
+    };
+
     // === Border walls (perimeter) ============================================
     const BORDER_H = 4.0;
     const BORDER_THICKNESS = 2; // cells
-    const fillRow = (h: number) => new Float32Array(W).fill(h);
-    const fillCol = (h: number) => new Float32Array(H).fill(h);
     const borderH = BORDER_H;
 
     // North border
@@ -45,6 +57,7 @@ const demo: Demo = {
         return a;
       })(),
     );
+    markSolid({ x: 0, y: 0, w: W, h: BORDER_THICKNESS });
     // East border
     ctx.solver.writeBedRegion(
       { x: W - BORDER_THICKNESS, y: 0, w: BORDER_THICKNESS, h: H },
@@ -54,6 +67,7 @@ const demo: Demo = {
         return a;
       })(),
     );
+    markSolid({ x: W - BORDER_THICKNESS, y: 0, w: BORDER_THICKNESS, h: H });
     // West border
     ctx.solver.writeBedRegion(
       { x: 0, y: 0, w: BORDER_THICKNESS, h: H },
@@ -63,6 +77,7 @@ const demo: Demo = {
         return a;
       })(),
     );
+    markSolid({ x: 0, y: 0, w: BORDER_THICKNESS, h: H });
 
     // South border with a centred breach (~1.5 m wide).
     const breachWidthM = 1.5;
@@ -76,6 +91,14 @@ const demo: Demo = {
       }
     }
     ctx.solver.writeBedRegion({ x: 0, y: H - BORDER_THICKNESS, w: W, h: BORDER_THICKNESS }, south);
+    // Mark south-border non-breach segments Solid (breach stays as Interior so
+    // water can flow through it; tick() pins it to Inflow with target tideH).
+    if (breachI0 > 0) {
+      markSolid({ x: 0, y: H - BORDER_THICKNESS, w: breachI0, h: BORDER_THICKNESS });
+    }
+    if (breachI1 < W) {
+      markSolid({ x: breachI1, y: H - BORDER_THICKNESS, w: W - breachI1, h: BORDER_THICKNESS });
+    }
 
     // Mark breach cells as Inflow boundary (target depth updated per frame in tick).
     ctx.solver.writeBoundaryRegionTarget(
@@ -136,15 +159,32 @@ const demo: Demo = {
     const placeBuilding = (b: Building) => {
       const { cx, cz, halfW, wallH, door } = b;
       const span = 2 * halfW + 1;
-      const writeWall = (x: number, y: number, w: number, h: number, gapStart?: number, gapEnd?: number) => {
+      const writeWall = (
+        x: number, y: number, w: number, h: number,
+        axis: 'x' | 'y',
+        gapStart?: number, gapEnd?: number,
+      ) => {
         const buf = new Float32Array(w * h);
         for (let j = 0; j < h; j++) {
           for (let i = 0; i < w; i++) {
-            const isGap = gapStart !== undefined && gapEnd !== undefined && i >= gapStart && i < gapEnd;
+            const along = axis === 'x' ? i : j;
+            const isGap = gapStart !== undefined && gapEnd !== undefined && along >= gapStart && along < gapEnd;
             buf[j * w + i] = isGap ? 0 : wallH;
           }
         }
         ctx.solver.writeBedRegion({ x, y, w, h }, buf);
+        // Stamp Solid on non-gap segments; door cells stay Interior so water
+        // flows through.  Without this, KP's wet/dry handling overflows a
+        // 1.0–1.5 m wall once the 2.5 m tide arrives and explodes the sim.
+        if (gapStart === undefined || gapEnd === undefined) {
+          markSolid({ x, y, w, h });
+        } else if (axis === 'x') {
+          if (gapStart > 0) markSolid({ x, y, w: gapStart, h });
+          if (gapEnd < w) markSolid({ x: x + gapEnd, y, w: w - gapEnd, h });
+        } else {
+          if (gapStart > 0) markSolid({ x, y, w, h: gapStart });
+          if (gapEnd < h) markSolid({ x, y: y + gapEnd, w, h: h - gapEnd });
+        }
       };
       const doorMid = Math.floor(span / 2);
       const doorHalf = door ? Math.max(1, Math.floor(door.width / 2)) : 0;
@@ -156,6 +196,7 @@ const demo: Demo = {
         cz - halfW,
         span,
         1,
+        'x',
         doorOnSide('N') ? doorMid - doorHalf : undefined,
         doorOnSide('N') ? doorMid + doorHalf : undefined,
       );
@@ -165,23 +206,30 @@ const demo: Demo = {
         cz + halfW,
         span,
         1,
+        'x',
         doorOnSide('S') ? doorMid - doorHalf : undefined,
         doorOnSide('S') ? doorMid + doorHalf : undefined,
       );
       // West wall (smaller i)
-      const westBuf = new Float32Array(span);
-      for (let j = 0; j < span; j++) {
-        const isGap = doorOnSide('W') && j >= doorMid - doorHalf && j < doorMid + doorHalf;
-        westBuf[j] = isGap ? 0 : wallH;
-      }
-      ctx.solver.writeBedRegion({ x: cx - halfW, y: cz - halfW, w: 1, h: span }, westBuf);
+      writeWall(
+        cx - halfW,
+        cz - halfW,
+        1,
+        span,
+        'y',
+        doorOnSide('W') ? doorMid - doorHalf : undefined,
+        doorOnSide('W') ? doorMid + doorHalf : undefined,
+      );
       // East wall
-      const eastBuf = new Float32Array(span);
-      for (let j = 0; j < span; j++) {
-        const isGap = doorOnSide('E') && j >= doorMid - doorHalf && j < doorMid + doorHalf;
-        eastBuf[j] = isGap ? 0 : wallH;
-      }
-      ctx.solver.writeBedRegion({ x: cx + halfW, y: cz - halfW, w: 1, h: span }, eastBuf);
+      writeWall(
+        cx + halfW,
+        cz - halfW,
+        1,
+        span,
+        'y',
+        doorOnSide('E') ? doorMid - doorHalf : undefined,
+        doorOnSide('E') ? doorMid + doorHalf : undefined,
+      );
 
       // Visual: render each wall as oriented boxes; if this wall is the
       // door side, render it as TWO segments straddling the gap so the
