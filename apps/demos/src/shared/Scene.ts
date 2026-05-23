@@ -456,11 +456,16 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
       ctx.simStepMs.push(simMs);
       if (ctx.simStepMs.length > MAX_FRAME_SAMPLES) ctx.simStepMs.shift();
 
-      // DEBUG: Periodic diagnostic logging (1× per ~60 frames).  Reports
-      // max(h), max(|u|), max(|v|), and NaN detection so the user can
-      // identify when/where the simulation goes unstable.  Set
-      // `window.__isenflow_debug = false` to silence.
-      if (ctx.tickCount % 60 === 0 && (window as { __isenflow_debug?: boolean }).__isenflow_debug !== false) {
+      // DEBUG: Diagnostic logging — every 10 frames for the first 100
+      // (~1.5 s, captures spike onset), then every 60 frames after.
+      // Reports max(h), max(|u|), max(|v|), and NaN detection.
+      // Silence: set `window.__isenflow_debug = false` in the console.
+      const debugEnabled = (window as { __isenflow_debug?: boolean }).__isenflow_debug !== false;
+      const shouldDiagnose = debugEnabled && (
+        (ctx.tickCount <= 100 && ctx.tickCount % 10 === 0) ||
+        (ctx.tickCount > 100 && ctx.tickCount % 60 === 0)
+      );
+      if (shouldDiagnose) {
         void diagnose(ctx);
       }
 
