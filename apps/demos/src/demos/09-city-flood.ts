@@ -407,17 +407,17 @@ function placeBuilding(ctx: Parameters<Demo['setup']>[0], b: Building) {
     // Stamp Solid on the non-gap cells so KP treats them as impermeable
     // walls (not just tall water).  Sill cells (gap) stay as bed only.
     if (supportsSolid) {
-      const ms = (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion;
+      const solver = ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void };
       if (gapStart === undefined || gapEnd === undefined) {
-        ms({ x, y, w, h });
+        solver.markSolidRegion({ x, y, w, h });
       } else {
         // Mark the two non-gap segments along the wall axis
         if (axis === 'x') {
-          if (gapStart > 0) ms({ x, y, w: gapStart, h });
-          if (gapEnd < w) ms({ x: x + gapEnd, y, w: w - gapEnd, h });
+          if (gapStart > 0) solver.markSolidRegion({ x, y, w: gapStart, h });
+          if (gapEnd < w) solver.markSolidRegion({ x: x + gapEnd, y, w: w - gapEnd, h });
         } else {
-          if (gapStart > 0) ms({ x, y, w, h: gapStart });
-          if (gapEnd < h) ms({ x, y: y + gapEnd, w, h: h - gapEnd });
+          if (gapStart > 0) solver.markSolidRegion({ x, y, w, h: gapStart });
+          if (gapEnd < h) solver.markSolidRegion({ x, y: y + gapEnd, w, h: h - gapEnd });
         }
       }
     }

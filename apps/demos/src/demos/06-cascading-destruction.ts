@@ -38,8 +38,7 @@ const demo: Demo = {
       const wall = new Float32Array(g.height).fill(3);
       ctx.solver.writeBedRegion(region, wall);
       if (supportsSolid) {
-        const ms = (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion;
-        ms(region);
+        (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion(region);
       }
       const mesh = ownByDemo(new THREE.Mesh(new THREE.BoxGeometry(g.dx, 3, g.height * g.dx), wallMat.clone()));
       mesh.name = `wall${idx}`;

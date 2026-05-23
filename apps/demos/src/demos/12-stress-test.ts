@@ -178,8 +178,7 @@ const demo: Demo = {
       const buf = new Float32Array(w * h).fill(b.wallH);
       ctx.solver.writeBedRegion({ x: x0, y: y0, w, h }, buf);
       if (supportsSolid) {
-        const ms = (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion;
-        ms({ x: x0, y: y0, w, h });
+        (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion({ x: x0, y: y0, w, h });
       }
       // Visual mesh
       const mat = new THREE.MeshStandardMaterial({ color: b.color, roughness: 0.85 });
@@ -209,8 +208,7 @@ const demo: Demo = {
       const buf = new Float32Array(region.w * region.h).fill(wallH);
       ctx.solver.writeBedRegion(region, buf);
       if (supportsSolid) {
-        const ms = (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion;
-        ms(region);
+        (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion(region);
       }
       // Visual mesh
       const mat = new THREE.MeshStandardMaterial({ color: 0x554433, roughness: 0.9 });

@@ -586,6 +586,10 @@ async function diagnose(ctx: DemoContext): Promise<void> {
     let nanIdx = -1;
     let totalH = 0;
     let n = 0;
+    // Record the FIRST NaN cell's (h, hu, hv) for diagnostics — we want the
+    // actual NaN values, not whatever was in the loop variable when we hit
+    // the end.
+    let nanH = 0, nanHu = 0, nanHv = 0;
     if (solver.readState) {
       const s = await solver.readState();
       n = s.length / 4;
@@ -594,7 +598,10 @@ async function diagnose(ctx: DemoContext): Promise<void> {
         hu = s[i * 4 + 1]!;
         hv = s[i * 4 + 2]!;
         if (!Number.isFinite(h) || !Number.isFinite(hu) || !Number.isFinite(hv)) {
-          if (nanIdx < 0) nanIdx = i;
+          if (nanIdx < 0) {
+            nanIdx = i;
+            nanH = h; nanHu = hu; nanHv = hv;
+          }
           continue;
         }
         if (h > maxH) maxH = h;
@@ -615,8 +622,10 @@ async function diagnose(ctx: DemoContext): Promise<void> {
     const avgH = totalH / Math.max(1, n);
     const tag = `[isenflow t=${ctx.simTime.toFixed(2)} tick=${ctx.tickCount}]`;
     if (nanIdx >= 0) {
+      const ix = nanIdx % (ctx.solver.grid.width);
+      const iy = Math.floor(nanIdx / ctx.solver.grid.width);
       // eslint-disable-next-line no-console
-      console.error(`${tag} !! NaN at idx=${nanIdx} (h=${h}, hu=${hu}, hv=${hv})`);
+      console.error(`${tag} !! NaN at idx=${nanIdx} (i=${ix}, j=${iy}) h=${nanH} hu=${nanHu} hv=${nanHv}`);
       return;
     }
     if (maxH > 10) {
