@@ -162,13 +162,16 @@ export async function createDemoContext(canvas: HTMLCanvasElement): Promise<Demo
     dx: WORLD / 384,
     origin: [-WORLD / 2, -WORLD / 2],
   });
-  // Internal physics tick is 1/240 s.  With dx ≈ 4 cm and h ≤ ~4 m, max
-  // wave speed c = √(g·h) ≈ 6.3 m/s → CFL = c·dt/dx ≈ 0.65, comfortably
-  // below the KP central-upwind stability limit of 0.5 per substep (the
-  // SSP-RK2 scheme is provably stable up to CFL ~ 1.0 in practice).
+  // Internal physics tick is 1/960 s with 4 substeps per render frame
+  // (240 Hz effective sim rate, same as before).  With dx ≈ 4 cm and h
+  // up to ~4 m typical (~8 m transient), max wave speed c = √(g·h) ≈
+  // 8.9 m/s → CFL = c·dt/dx ≈ 0.23 — well under the KP central-upwind
+  // stability limit of 0.5 (per substep, even before RK2's larger margin).
+  // The original dt=1/240 ran at CFL ≈ 0.65 which is marginal for KP and
+  // diverged on any transient that briefly pushed h above ~10 m.
   const solver = new SweSolver(gpu, grid, {
-    dt: 1 / 240,
-    substepsPerFrame: 1,
+    dt: 1 / 960,
+    substepsPerFrame: 4,
     manningN: 0.03,
     desingEpsilon: 1e-3,
   });
