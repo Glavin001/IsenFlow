@@ -453,6 +453,14 @@ export function startLoop(ctx: DemoContext, onStats: (stats: LoopStats) => void)
       ctx.simStepMs.push(simMs);
       if (ctx.simStepMs.length > MAX_FRAME_SAMPLES) ctx.simStepMs.shift();
 
+      // DEBUG: Periodic diagnostic logging (1× per ~60 frames).  Reports
+      // max(h), max(|u|), max(|v|), and NaN detection so the user can
+      // identify when/where the simulation goes unstable.  Set
+      // `window.__isenflow_debug = false` to silence.
+      if (ctx.tickCount % 60 === 0 && (window as { __isenflow_debug?: boolean }).__isenflow_debug !== false) {
+        void diagnose(ctx);
+      }
+
       // 3) Body→water displacement (uses prevBed → bed delta).
       ctx.solver.applyDisplacement();
 
@@ -541,6 +549,77 @@ function percentile(arr: readonly number[], p: number): number {
   const sorted = [...arr].sort((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * sorted.length)));
   return sorted[idx]!;
+}
+
+/**
+ * Diagnostic readback — reads the conservative state (h, hu, hv) once and
+ * prints max-magnitude metrics + NaN/Inf detection to the console.  Async
+ * (uses GPU readback) and fire-and-forget — should not block the main loop.
+ *
+ * Enable/disable via `window.__isenflow_debug` (default ON).
+ *
+ * Output format:
+ *   [isenflow t=1.23 tick=72] maxH=1.32 maxU=0.85 maxV=0.41 vol=4.32  ← healthy
+ *   [isenflow t=1.23 tick=72] !! NaN at idx=12345 (h=NaN, hu=...)    ← BROKEN
+ *   [isenflow t=1.23 tick=72] !! SPIKE maxH=12.45 (> 5×expected)      ← spike
+ */
+let diagnoseInFlight = false;
+async function diagnose(ctx: DemoContext): Promise<void> {
+  if (diagnoseInFlight) return;
+  diagnoseInFlight = true;
+  try {
+    const solver = ctx.solver as { readState?: () => Promise<Float32Array>; readVelocity: () => Promise<Float32Array>; readWater: () => Promise<Float32Array> };
+    // Prefer the KP-native readState() (h, hu, hv per cell) when available.
+    let h = 0, hu = 0, hv = 0, maxH = 0, maxAbsHu = 0, maxAbsHv = 0;
+    let nanIdx = -1;
+    let totalH = 0;
+    let n = 0;
+    if (solver.readState) {
+      const s = await solver.readState();
+      n = s.length / 4;
+      for (let i = 0; i < n; i++) {
+        h = s[i * 4 + 0]!;
+        hu = s[i * 4 + 1]!;
+        hv = s[i * 4 + 2]!;
+        if (!Number.isFinite(h) || !Number.isFinite(hu) || !Number.isFinite(hv)) {
+          if (nanIdx < 0) nanIdx = i;
+          continue;
+        }
+        if (h > maxH) maxH = h;
+        if (Math.abs(hu) > maxAbsHu) maxAbsHu = Math.abs(hu);
+        if (Math.abs(hv) > maxAbsHv) maxAbsHv = Math.abs(hv);
+        totalH += h;
+      }
+    } else {
+      const w = await solver.readWater();
+      n = w.length / 2;
+      for (let i = 0; i < n; i++) {
+        h = w[i * 2]!;
+        if (!Number.isFinite(h)) { if (nanIdx < 0) nanIdx = i; continue; }
+        if (h > maxH) maxH = h;
+        totalH += h;
+      }
+    }
+    const avgH = totalH / Math.max(1, n);
+    const tag = `[isenflow t=${ctx.simTime.toFixed(2)} tick=${ctx.tickCount}]`;
+    if (nanIdx >= 0) {
+      // eslint-disable-next-line no-console
+      console.error(`${tag} !! NaN at idx=${nanIdx} (h=${h}, hu=${hu}, hv=${hv})`);
+      return;
+    }
+    if (maxH > 10) {
+      // eslint-disable-next-line no-console
+      console.warn(`${tag} !! SPIKE maxH=${maxH.toFixed(2)} maxHu=${maxAbsHu.toFixed(2)} maxHv=${maxAbsHv.toFixed(2)} avgH=${avgH.toFixed(2)}`);
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`${tag} maxH=${maxH.toFixed(3)} maxHu=${maxAbsHu.toFixed(3)} maxHv=${maxAbsHv.toFixed(3)} avgH=${avgH.toFixed(3)}`);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('[isenflow] diagnose readback failed:', e);
+  } finally {
+    diagnoseInFlight = false;
+  }
 }
 
 function showError(err: Error): void {
