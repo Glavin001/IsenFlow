@@ -27,10 +27,20 @@ const demo: Demo = {
     const chunks: ChunkEntry[] = [];
     const positions = [0.3, 0.5, 0.7].map((f) => Math.floor(g.width * f));
     const budgets = [25000, 85000, 170000];
+    // On KP (SweSolver), use markSolidRegion so the 3 m walls are TRUE
+    // impermeable barriers instead of "tall water that overtops" — which
+    // is what the legacy VP scheme would do, producing wet/dry spike
+    // artifacts as the tide rose against the wall.
+    const supportsSolid =
+      typeof (ctx.solver as { markSolidRegion?: unknown }).markSolidRegion === 'function';
     positions.forEach((px, idx) => {
       const region = { x: px, y: 0, w: 1, h: g.height };
       const wall = new Float32Array(g.height).fill(3);
       ctx.solver.writeBedRegion(region, wall);
+      if (supportsSolid) {
+        const ms = (ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void }).markSolidRegion;
+        ms(region);
+      }
       const mesh = ownByDemo(new THREE.Mesh(new THREE.BoxGeometry(g.dx, 3, g.height * g.dx), wallMat.clone()));
       mesh.name = `wall${idx}`;
       mesh.position.set(g.origin[0] + (px + 0.5) * g.dx, 1.5, g.origin[1] + (g.height * g.dx) / 2);
@@ -106,6 +116,8 @@ const demo: Demo = {
         c.mesh.visible = false;
         const blank = new Float32Array(c.cells.h).fill(0);
         ctx.solver.writeBedRegion(c.cells, blank);
+        // Clear the Solid mask back to Interior so water can flow through
+        ctx.solver.writeBoundaryRegion(c.cells, BoundaryType.Interior);
       }
     }
   },
