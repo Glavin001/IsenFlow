@@ -253,13 +253,26 @@ export class WaterSurface {
         const g = this.solver.grid;
         const pos = this.positions;
         const nx = g.width + 1;
+
+        // Optional 1-2-1 spatial smoothing of h (NOT the simulation —
+        // this is purely a render-side filter that hides any residual
+        // numerical roughness without affecting physics).  Applied
+        // only in ocean-style mode; raw mesh exposes the unsmoothed
+        // field for debugging.
+        const hSmooth = this._oceanStyle ? smoothHField(w, g.width, g.height) : null;
+        const sampleH = (ci: number, cj: number): number => {
+          const idx2 = cj * g.width + ci;
+          if (hSmooth) return hSmooth[idx2] ?? 0;
+          return w[idx2 * 2] ?? 0;
+        };
+
         for (let j = 0; j <= g.height; j++) {
           for (let i = 0; i <= g.width; i++) {
             const ci = Math.min(g.width - 1, i);
             const cj = Math.min(g.height - 1, j);
-            const idx = (cj * g.width + ci) * 2;
-            const h = w[idx] ?? 0;
-            const bedTotal = b[idx + 1] ?? 0;
+            const idx = cj * g.width + ci;
+            const h = sampleH(ci, cj);
+            const bedTotal = b[idx * 2 + 1] ?? 0;
             const vi = j * nx + i;
             if (h > 0.001) {
               pos.setY(vi, bedTotal + h);
@@ -273,6 +286,10 @@ export class WaterSurface {
         this.depthAttr.needsUpdate = true;
         pos.needsUpdate = true;
         this.geom.computeVertexNormals();
+        // Clamp normals so any residual narrow spike can't catch the
+        // sharp specular lobe.  Limits min |normal.y| to 0.34 (~70°
+        // max surface slope).  Cheap operation on 384² ≈ 150K vertices.
+        clampNormals(this.geom);
         this.consecutiveErrors = 0;
         this.hasFreshData = true;
       })
@@ -309,3 +326,70 @@ export class WaterSurface {
 }
 
 type Float32BufferAttribute = THREE.BufferAttribute & { array: Float32Array };
+
+/**
+ * 1-2-1 separable smoothing on the cell-centered h field.  Input `water`
+ * is the (h, h_prev) interleaved readback; output is a fresh Float32Array
+ * of length W*H with smoothed h values.  Pure CPU, ~0.5 ms at 384².
+ *
+ * This is purely a RENDER-side filter — the simulation state is untouched.
+ * Hides residual numerical roughness without affecting physics.
+ */
+function smoothHField(water: Float32Array, W: number, H: number): Float32Array {
+  const src = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) src[i] = water[i * 2] ?? 0;
+
+  // X-pass: each cell = 0.25·left + 0.5·self + 0.25·right
+  const xPass = new Float32Array(W * H);
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const c = j * W + i;
+      const l = i > 0 ? src[c - 1]! : src[c]!;
+      const r = i < W - 1 ? src[c + 1]! : src[c]!;
+      xPass[c] = 0.25 * l + 0.5 * src[c]! + 0.25 * r;
+    }
+  }
+  // Y-pass on x-passed result
+  const yPass = new Float32Array(W * H);
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const c = j * W + i;
+      const d = j > 0 ? xPass[c - W]! : xPass[c]!;
+      const u = j < H - 1 ? xPass[c + W]! : xPass[c]!;
+      yPass[c] = 0.25 * d + 0.5 * xPass[c]! + 0.25 * u;
+    }
+  }
+  return yPass;
+}
+
+/**
+ * Clamp vertex normals so |n.y| ≥ 0.34 (max surface slope ≈ 70°).
+ * Any residual single-cell spike that escapes the solver's positivity
+ * preservation still produces a normal that's at-most-mildly tilted, so
+ * the high-exponent specular lobe can't paint a bright vertical highlight.
+ */
+function clampNormals(geom: THREE.PlaneGeometry): void {
+  const n = geom.attributes.normal as Float32BufferAttribute | undefined;
+  if (!n) return;
+  const arr = n.array;
+  const MIN_Y = 0.34;
+  for (let i = 0; i < arr.length; i += 3) {
+    const y = arr[i + 1]!;
+    if (y >= MIN_Y) continue;
+    if (y <= -MIN_Y) continue;  // back-facing (unlikely for water) — leave alone
+    // Preserve the horizontal direction, scale Y up to MIN_Y, renormalize.
+    const x = arr[i + 0]!;
+    const z = arr[i + 2]!;
+    const newY = MIN_Y;
+    // Rescale (x, z) so the resulting unit vector has y = MIN_Y
+    const horizLen = Math.hypot(x, z);
+    const targetHoriz = Math.sqrt(Math.max(0, 1 - newY * newY));
+    if (horizLen > 1e-6) {
+      const scale = targetHoriz / horizLen;
+      arr[i + 0] = x * scale;
+      arr[i + 2] = z * scale;
+    }
+    arr[i + 1] = newY;
+  }
+  n.needsUpdate = true;
+}
