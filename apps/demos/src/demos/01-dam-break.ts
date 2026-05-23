@@ -87,6 +87,68 @@ const demo: Demo = {
       ctx.scene.add(hm);
     }
 
+    // Solid ground collider so dynamic crates have something to rest on
+    // before the wave arrives. Sits at y=0 (below mean terrain) so it
+    // doesn't interfere with the ridge/valley mesh-less collision.
+    const groundBody = ctx.world.createRigidBody(
+      ctx.rapier.RigidBodyDesc.fixed().setTranslation(0, -0.05, 0),
+    );
+    ctx.world.createCollider(
+      ctx.rapier.ColliderDesc.cuboid(worldHalf, 0.05, worldHalf),
+      groundBody,
+    );
+
+    // === Dynamic crates downstream ===
+    // Wooden crates (density 400 kg/m³ — half that of water, so they float
+    // half-submerged). The flood wave pushes them east via hydrodynamic drag
+    // computed by the GPU coupling kernel.
+    const crateMat = new THREE.MeshStandardMaterial({ color: 0x9b6a3a, roughness: 0.9 });
+    const halfX = 0.2, halfY = 0.2, halfZ = 0.2;
+    const cratePositions: Array<[number, number]> = [
+      [0.5, -2.0],   // ridge approach, gets hit first
+      [2.5, 0.5],    // in the valley pool
+      [3.0, -1.5],
+      [4.0, 1.5],
+      [5.0, -0.5],
+    ];
+    for (let k = 0; k < cratePositions.length; k++) {
+      const [cx, cz] = cratePositions[k]!;
+      const spawnY = 1.2; // safely above any terrain bump; settles onto bed
+      const crateMesh = ownByDemo(new THREE.Mesh(
+        new THREE.BoxGeometry(halfX * 2, halfY * 2, halfZ * 2),
+        crateMat,
+      ));
+      const name = `crate${k}`;
+      crateMesh.name = name;
+      crateMesh.position.set(cx, spawnY, cz);
+      ctx.scene.add(crateMesh);
+
+      const crateBody = ctx.world.createRigidBody(
+        ctx.rapier.RigidBodyDesc.dynamic()
+          .setTranslation(cx, spawnY, cz)
+          .setLinearDamping(2.0)
+          .setAngularDamping(5.0)
+          // Keep crates upright: lock pitch & roll, allow yaw rotation.
+          .enabledRotations(false, true, false),
+      );
+      ctx.world.createCollider(
+        ctx.rapier.ColliderDesc.cuboid(halfX, halfY, halfZ).setDensity(400),
+        crateBody,
+      );
+
+      ctx.spawnCoupledBody({
+        name,
+        body: crateBody,
+        halfExtents: [halfX, halfY, halfZ],
+        mesh: crateMesh,
+        // Downstream cells are dry initially; bed varies but we use 0 as
+        // the reference (ridge/valley deltas are small compared to the
+        // 4m reservoir head, and the coupling reads actual bed per-cell).
+        waterLevelRef: 0,
+        bedLevelRef: 0,
+      });
+    }
+
     const water = new WaterSurface(ctx.solver);
     ctx.scene.add(ownByDemo(water.mesh));
     ctx.scratch.water = water;
