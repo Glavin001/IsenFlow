@@ -50,6 +50,9 @@ struct ReconFace {
   hStar:  f32,
   huStar: f32,
   hvStar: f32,
+  /// Pre-Audusse depth on THIS cell's side (used for the well-balanced
+  /// bed-pressure source correction: (g/2)·(h*² - h_pre²)).
+  hPre:   f32,
 };
 
 /// Reconstruct the side-of-face state given the cell's center state +
@@ -69,7 +72,7 @@ fn reconstruct(
   let u_pre = kp_desingularize(h_pre, hu_pre, eps);
   let v_pre = kp_desingularize(h_pre, hv_pre, eps);
 
-  return ReconFace(h_star, h_star * u_pre, h_star * v_pre);
+  return ReconFace(h_star, h_star * u_pre, h_star * v_pre, h_pre);
 }
 
 @compute @workgroup_size(8, 8)
@@ -114,52 +117,58 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dhv_y_s = read_slope_dhv_y(c);
 
   // ---------------- EAST face (between self and (i+1, j)) ----------------
+  // Treat Solid neighbors AND out-of-domain as REFLECTIVE walls (mirror
+  // ghost): h_ghost = h_self, hu_ghost = -hu_self (normal flipped), hv
+  // preserved.  This keeps the wall-reaction pressure in the flux.
   {
     let pN = p + vec2<i32>(1, 0);
     let inside = in_bounds(pN, W, H);
     let cN = select(c, cell_idx(pN.x, pN.y, W), inside);
     let btN = select(KP_BT_OPEN, boundary[cN], inside);
-    if (btN != KP_BT_SOLID) {
-      var sN: vec4<f32>;
-      var bN: f32;
-      if (inside) {
-        sN = state[cN];
-        bN = bed[cN * 2u + 1u];
-      } else {
-        // Domain edge — use ghost cell based on self boundary type
-        sN = s;
-        bN = b_self;
-        if (bt == KP_BT_CLOSED) { sN.y = -s.y; }
-        else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
-        else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
-        else if (bt != KP_BT_OPEN) { sN.y = -s.y; }  // default reflective
-      }
-      let bStar = max(b_self, bN);
+    let neighborIsSolid = btN == KP_BT_SOLID;
 
-      // From SELF (east edge): +0.5 sign on slopes
-      let L = reconstruct(s,  b_self, bStar,
-        dw_x_s, dhu_x_s, dhv_x_s, 1.0, desEps);
-      // From NEIGHBOR (west edge): -0.5 sign on its slopes
-      let dw_x_N  = select(0.0, read_slope_dw_x(cN),  inside);
-      let dhu_x_N = select(0.0, read_slope_dhu_x(cN), inside);
-      let dhv_x_N = select(0.0, read_slope_dhv_x(cN), inside);
-      let R = reconstruct(sN, bN, bStar,
-        dw_x_N, dhu_x_N, dhv_x_N, -1.0, desEps);
-
-      let f = kp_central_upwind(
-        L.hStar, L.huStar, L.hvStar,
-        R.hStar, R.huStar, R.hvStar,
-        0u, g, desEps,
-      );
-      if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
-      dU.x -= dtOverDx * f.fH;
-      dU.y -= dtOverDx * f.fHu;
-      dU.z -= dtOverDx * f.fHv;
-      // Well-balanced source from east face for SELF (cell L of this face):
-      //   + g/2 · (h*_L)²  →  dU_hu += dtOverDx · pressLstar
-      let pressLstar = 0.5 * g * L.hStar * L.hStar;
-      dU.y += dtOverDx * pressLstar;
+    var sN: vec4<f32>;
+    var bN: f32;
+    var dw_x_N: f32 = 0.0;
+    var dhu_x_N: f32 = 0.0;
+    var dhv_x_N: f32 = 0.0;
+    if (inside && !neighborIsSolid) {
+      sN = state[cN];
+      bN = bed[cN * 2u + 1u];
+      dw_x_N  = read_slope_dw_x(cN);
+      dhu_x_N = read_slope_dhu_x(cN);
+      dhv_x_N = read_slope_dhv_x(cN);
+    } else if (neighborIsSolid) {
+      // Reflective mirror of self (flip x-momentum)
+      sN = vec4<f32>(s.x, -s.y, s.z, 0.0);
+      bN = b_self;
+    } else {
+      // Domain edge — ghost based on self boundary type
+      sN = s;
+      bN = b_self;
+      if (bt == KP_BT_CLOSED) { sN.y = -s.y; }
+      else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
+      else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
+      else if (bt != KP_BT_OPEN) { sN.y = -s.y; }
     }
+    let bStar = max(b_self, bN);
+
+    let L = reconstruct(s,  b_self, bStar,
+      dw_x_s, dhu_x_s, dhv_x_s, 1.0, desEps);
+    let R = reconstruct(sN, bN, bStar,
+      dw_x_N, dhu_x_N, dhv_x_N, -1.0, desEps);
+
+    let f = kp_central_upwind(
+      L.hStar, L.huStar, L.hvStar,
+      R.hStar, R.huStar, R.hvStar,
+      0u, g, desEps,
+    );
+    if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
+    dU.x -= dtOverDx * f.fH;
+    dU.y -= dtOverDx * f.fHu;
+    dU.z -= dtOverDx * f.fHv;
+    // L-side Audusse correction: dU_hu += dtOverDx · (g/2) · (h*_L² - h_L²)
+    dU.y += dtOverDx * 0.5 * g * (L.hStar * L.hStar - L.hPre * L.hPre);
   }
 
   // ---------------- WEST face (between self and (i-1, j)) ----------------
@@ -168,46 +177,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inside = in_bounds(pN, W, H);
     let cN = select(c, cell_idx(pN.x, pN.y, W), inside);
     let btN = select(KP_BT_OPEN, boundary[cN], inside);
-    if (btN != KP_BT_SOLID) {
-      var sN: vec4<f32>;
-      var bN: f32;
-      if (inside) {
-        sN = state[cN];
-        bN = bed[cN * 2u + 1u];
-      } else {
-        sN = s;
-        bN = b_self;
-        if (bt == KP_BT_CLOSED) { sN.y = -s.y; }
-        else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
-        else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
-        else if (bt != KP_BT_OPEN) { sN.y = -s.y; }
-      }
-      let bStar = max(b_self, bN);
+    let neighborIsSolid = btN == KP_BT_SOLID;
 
-      // From NEIGHBOR (east edge): +0.5 sign
-      let dw_x_N  = select(0.0, read_slope_dw_x(cN),  inside);
-      let dhu_x_N = select(0.0, read_slope_dhu_x(cN), inside);
-      let dhv_x_N = select(0.0, read_slope_dhv_x(cN), inside);
-      let L = reconstruct(sN, bN, bStar,
-        dw_x_N, dhu_x_N, dhv_x_N, 1.0, desEps);
-      // From SELF (west edge): -0.5 sign
-      let R = reconstruct(s, b_self, bStar,
-        dw_x_s, dhu_x_s, dhv_x_s, -1.0, desEps);
-
-      let f = kp_central_upwind(
-        L.hStar, L.huStar, L.hvStar,
-        R.hStar, R.huStar, R.hvStar,
-        0u, g, desEps,
-      );
-      if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
-      dU.x += dtOverDx * f.fH;
-      dU.y += dtOverDx * f.fHu;
-      dU.z += dtOverDx * f.fHv;
-      // Well-balanced source from west face for SELF (cell R of this face):
-      //   - g/2 · (h*_R)²  →  dU_hu -= dtOverDx · pressRstar
-      let pressRstar = 0.5 * g * R.hStar * R.hStar;
-      dU.y -= dtOverDx * pressRstar;
+    var sN: vec4<f32>;
+    var bN: f32;
+    var dw_x_N: f32 = 0.0;
+    var dhu_x_N: f32 = 0.0;
+    var dhv_x_N: f32 = 0.0;
+    if (inside && !neighborIsSolid) {
+      sN = state[cN];
+      bN = bed[cN * 2u + 1u];
+      dw_x_N  = read_slope_dw_x(cN);
+      dhu_x_N = read_slope_dhu_x(cN);
+      dhv_x_N = read_slope_dhv_x(cN);
+    } else if (neighborIsSolid) {
+      sN = vec4<f32>(s.x, -s.y, s.z, 0.0);
+      bN = b_self;
+    } else {
+      sN = s;
+      bN = b_self;
+      if (bt == KP_BT_CLOSED) { sN.y = -s.y; }
+      else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
+      else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
+      else if (bt != KP_BT_OPEN) { sN.y = -s.y; }
     }
+    let bStar = max(b_self, bN);
+
+    let L = reconstruct(sN, bN, bStar,
+      dw_x_N, dhu_x_N, dhv_x_N, 1.0, desEps);
+    let R = reconstruct(s, b_self, bStar,
+      dw_x_s, dhu_x_s, dhv_x_s, -1.0, desEps);
+
+    let f = kp_central_upwind(
+      L.hStar, L.huStar, L.hvStar,
+      R.hStar, R.huStar, R.hvStar,
+      0u, g, desEps,
+    );
+    if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
+    dU.x += dtOverDx * f.fH;
+    dU.y += dtOverDx * f.fHu;
+    dU.z += dtOverDx * f.fHv;
+    // R-side Audusse correction (opposite sign from L-side):
+    //   dU_hu += dtOverDx · (g/2) · (h_pre_R² - h*_R²)
+    dU.y += dtOverDx * 0.5 * g * (R.hPre * R.hPre - R.hStar * R.hStar);
   }
 
   // ---------------- NORTH face (between self and (i, j+1)) ----------------
@@ -216,42 +228,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inside = in_bounds(pN, W, H);
     let cN = select(c, cell_idx(pN.x, pN.y, W), inside);
     let btN = select(KP_BT_OPEN, boundary[cN], inside);
-    if (btN != KP_BT_SOLID) {
-      var sN: vec4<f32>;
-      var bN: f32;
-      if (inside) {
-        sN = state[cN];
-        bN = bed[cN * 2u + 1u];
-      } else {
-        sN = s;
-        bN = b_self;
-        if (bt == KP_BT_CLOSED) { sN.z = -s.z; }
-        else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
-        else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
-        else if (bt != KP_BT_OPEN) { sN.z = -s.z; }
-      }
-      let bStar = max(b_self, bN);
+    let neighborIsSolid = btN == KP_BT_SOLID;
 
-      let L = reconstruct(s, b_self, bStar,
-        dw_y_s, dhu_y_s, dhv_y_s, 1.0, desEps);
-      let dw_y_N  = select(0.0, read_slope_dw_y(cN),  inside);
-      let dhu_y_N = select(0.0, read_slope_dhu_y(cN), inside);
-      let dhv_y_N = select(0.0, read_slope_dhv_y(cN), inside);
-      let R = reconstruct(sN, bN, bStar,
-        dw_y_N, dhu_y_N, dhv_y_N, -1.0, desEps);
-
-      let f = kp_central_upwind(
-        L.hStar, L.huStar, L.hvStar,
-        R.hStar, R.huStar, R.hvStar,
-        1u, g, desEps,
-      );
-      if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
-      dU.x -= dtOverDx * f.fH;
-      dU.y -= dtOverDx * f.fHu;
-      dU.z -= dtOverDx * f.fHv;
-      let pressLstar = 0.5 * g * L.hStar * L.hStar;
-      dU.z += dtOverDx * pressLstar;
+    var sN: vec4<f32>;
+    var bN: f32;
+    var dw_y_N: f32 = 0.0;
+    var dhu_y_N: f32 = 0.0;
+    var dhv_y_N: f32 = 0.0;
+    if (inside && !neighborIsSolid) {
+      sN = state[cN];
+      bN = bed[cN * 2u + 1u];
+      dw_y_N  = read_slope_dw_y(cN);
+      dhu_y_N = read_slope_dhu_y(cN);
+      dhv_y_N = read_slope_dhv_y(cN);
+    } else if (neighborIsSolid) {
+      sN = vec4<f32>(s.x, s.y, -s.z, 0.0);
+      bN = b_self;
+    } else {
+      sN = s;
+      bN = b_self;
+      if (bt == KP_BT_CLOSED) { sN.z = -s.z; }
+      else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
+      else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
+      else if (bt != KP_BT_OPEN) { sN.z = -s.z; }
     }
+    let bStar = max(b_self, bN);
+
+    let L = reconstruct(s, b_self, bStar,
+      dw_y_s, dhu_y_s, dhv_y_s, 1.0, desEps);
+    let R = reconstruct(sN, bN, bStar,
+      dw_y_N, dhu_y_N, dhv_y_N, -1.0, desEps);
+
+    let f = kp_central_upwind(
+      L.hStar, L.huStar, L.hvStar,
+      R.hStar, R.huStar, R.hvStar,
+      1u, g, desEps,
+    );
+    if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
+    dU.x -= dtOverDx * f.fH;
+    dU.y -= dtOverDx * f.fHu;
+    dU.z -= dtOverDx * f.fHv;
+    dU.z += dtOverDx * 0.5 * g * (L.hStar * L.hStar - L.hPre * L.hPre);
   }
 
   // ---------------- SOUTH face (between self and (i, j-1)) ----------------
@@ -260,42 +277,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let inside = in_bounds(pN, W, H);
     let cN = select(c, cell_idx(pN.x, pN.y, W), inside);
     let btN = select(KP_BT_OPEN, boundary[cN], inside);
-    if (btN != KP_BT_SOLID) {
-      var sN: vec4<f32>;
-      var bN: f32;
-      if (inside) {
-        sN = state[cN];
-        bN = bed[cN * 2u + 1u];
-      } else {
-        sN = s;
-        bN = b_self;
-        if (bt == KP_BT_CLOSED) { sN.z = -s.z; }
-        else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
-        else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
-        else if (bt != KP_BT_OPEN) { sN.z = -s.z; }
-      }
-      let bStar = max(b_self, bN);
+    let neighborIsSolid = btN == KP_BT_SOLID;
 
-      let dw_y_N  = select(0.0, read_slope_dw_y(cN),  inside);
-      let dhu_y_N = select(0.0, read_slope_dhu_y(cN), inside);
-      let dhv_y_N = select(0.0, read_slope_dhv_y(cN), inside);
-      let L = reconstruct(sN, bN, bStar,
-        dw_y_N, dhu_y_N, dhv_y_N, 1.0, desEps);
-      let R = reconstruct(s, b_self, bStar,
-        dw_y_s, dhu_y_s, dhv_y_s, -1.0, desEps);
-
-      let f = kp_central_upwind(
-        L.hStar, L.huStar, L.hvStar,
-        R.hStar, R.huStar, R.hvStar,
-        1u, g, desEps,
-      );
-      if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
-      dU.x += dtOverDx * f.fH;
-      dU.y += dtOverDx * f.fHu;
-      dU.z += dtOverDx * f.fHv;
-      let pressRstar = 0.5 * g * R.hStar * R.hStar;
-      dU.z -= dtOverDx * pressRstar;
+    var sN: vec4<f32>;
+    var bN: f32;
+    var dw_y_N: f32 = 0.0;
+    var dhu_y_N: f32 = 0.0;
+    var dhv_y_N: f32 = 0.0;
+    if (inside && !neighborIsSolid) {
+      sN = state[cN];
+      bN = bed[cN * 2u + 1u];
+      dw_y_N  = read_slope_dw_y(cN);
+      dhu_y_N = read_slope_dhu_y(cN);
+      dhv_y_N = read_slope_dhv_y(cN);
+    } else if (neighborIsSolid) {
+      sN = vec4<f32>(s.x, s.y, -s.z, 0.0);
+      bN = b_self;
+    } else {
+      sN = s;
+      bN = b_self;
+      if (bt == KP_BT_CLOSED) { sN.z = -s.z; }
+      else if (bt == KP_BT_INFLOW) { sN.x = boundaryTargetH[c]; }
+      else if (bt == KP_BT_SEA) { sN.x = boundaryTargetH[c]; sN.y = 0.0; sN.z = 0.0; }
+      else if (bt != KP_BT_OPEN) { sN.z = -s.z; }
     }
+    let bStar = max(b_self, bN);
+
+    let L = reconstruct(sN, bN, bStar,
+      dw_y_N, dhu_y_N, dhv_y_N, 1.0, desEps);
+    let R = reconstruct(s, b_self, bStar,
+      dw_y_s, dhu_y_s, dhv_y_s, -1.0, desEps);
+
+    let f = kp_central_upwind(
+      L.hStar, L.huStar, L.hvStar,
+      R.hStar, R.huStar, R.hvStar,
+      1u, g, desEps,
+    );
+    if (f.max_speed > maxSpeed) { maxSpeed = f.max_speed; }
+    dU.x += dtOverDx * f.fH;
+    dU.y += dtOverDx * f.fHu;
+    dU.z += dtOverDx * f.fHv;
+    dU.z += dtOverDx * 0.5 * g * (R.hPre * R.hPre - R.hStar * R.hStar);
   }
 
   // ---------------- RK blend + apply ----------------

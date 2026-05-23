@@ -470,25 +470,45 @@ export function kpSpatialOperator(
       const cL = idx(i, j, W);
       const cR = idx(i + 1, j, W);
 
-      // Skip if either side is a Solid cell — zero flux through that face
+      // Solid cells act as REFLECTIVE walls — the wet neighbor sees a
+      // mirror ghost (h_ghost = h_self, hu_ghost = -hu_self, hv preserved)
+      // so the wall reaction pressure is correctly resolved.  Skipping the
+      // face entirely (the previous approach) lost that reaction force and
+      // caused water adjacent to solids to drift.
       const btL = boundary[cL]!;
       const btR = boundary[cR]!;
-      if (btL === BT_SOLID || btR === BT_SOLID) continue;
+      if (btL === BT_SOLID && btR === BT_SOLID) continue; // both walls: nothing to do
+      const lIsWet = btL !== BT_SOLID;
+      const rIsWet = btR !== BT_SOLID;
 
-      // Reconstructed primitive surface elevation and momentum at the face
-      //   from each side.  Only (w, hu, hv) are slope-limited; h is derived
-      //   from w - B (with B piecewise-constant per cell).
-      const wLpre = h[cL]! + bed[cL]! + 0.5 * slopes.dw_x[cL]!;
-      const wRpre = h[cR]! + bed[cR]! - 0.5 * slopes.dw_x[cR]!;
-      const huLpre = hu[cL]! + 0.5 * slopes.dhu_x[cL]!;
-      const huRpre = hu[cR]! - 0.5 * slopes.dhu_x[cR]!;
-      const hvLpre = hv[cL]! + 0.5 * slopes.dhv_x[cL]!;
-      const hvRpre = hv[cR]! - 0.5 * slopes.dhv_x[cR]!;
+      // Self-data for the wet side(s); mirror-ghost for the dry side.
+      let wLpre: number, huLpre: number, hvLpre: number, bL: number;
+      let wRpre: number, huRpre: number, hvRpre: number, bR: number;
+      if (lIsWet) {
+        wLpre = h[cL]! + bed[cL]! + 0.5 * slopes.dw_x[cL]!;
+        huLpre = hu[cL]! + 0.5 * slopes.dhu_x[cL]!;
+        hvLpre = hv[cL]! + 0.5 * slopes.dhv_x[cL]!;
+        bL = bed[cL]!;
+      } else {
+        // Solid on left: mirror the wet right cell
+        wLpre = h[cR]! + bed[cR]! - 0.5 * slopes.dw_x[cR]!;
+        huLpre = -(hu[cR]! - 0.5 * slopes.dhu_x[cR]!);
+        hvLpre = hv[cR]! - 0.5 * slopes.dhv_x[cR]!;
+        bL = bed[cR]!;
+      }
+      if (rIsWet) {
+        wRpre = h[cR]! + bed[cR]! - 0.5 * slopes.dw_x[cR]!;
+        huRpre = hu[cR]! - 0.5 * slopes.dhu_x[cR]!;
+        hvRpre = hv[cR]! - 0.5 * slopes.dhv_x[cR]!;
+        bR = bed[cR]!;
+      } else {
+        // Solid on right: mirror the wet left cell
+        wRpre = h[cL]! + bed[cL]! + 0.5 * slopes.dw_x[cL]!;
+        huRpre = -(hu[cL]! + 0.5 * slopes.dhu_x[cL]!);
+        hvRpre = hv[cL]! + 0.5 * slopes.dhv_x[cL]!;
+        bR = bed[cL]!;
+      }
 
-      // Bed at face from each cell-center (B is piecewise constant in the
-      // Audusse formulation — no bed-slope reconstruction).
-      const bL = bed[cL]!;
-      const bR = bed[cR]!;
       const bStar = Math.max(bL, bR);
 
       // Pre-Audusse depths (used for momentum rescaling)
@@ -517,26 +537,23 @@ export function kpSpatialOperator(
       );
       if (localMax > maxSpeed) maxSpeed = localMax;
 
-      // Conservative update contribution (face area / cell area = 1/dx)
-      //   ∂U/∂t = -(F_E - F_W)/dx
-      // For left cell:  -F_face / dx  (face is the EAST face)
-      // For right cell: +F_face / dx  (face is the WEST face)
-      dU_h[cL]! -= dtOverDx * scratchFlux.h;
-      dU_hu[cL]! -= dtOverDx * scratchFlux.hu;
-      dU_hv[cL]! -= dtOverDx * scratchFlux.hv;
-      dU_h[cR]! += dtOverDx * scratchFlux.h;
-      dU_hu[cR]! += dtOverDx * scratchFlux.hu;
-      dU_hv[cR]! += dtOverDx * scratchFlux.hv;
-
-      // Well-balanced bed-pressure source term.  For each face, the cell on
-      // each side gets a g/2 · (h*)² contribution that exactly cancels the
-      // pressure component of the flux for lake-at-rest (h*_L = h*_R = h*,
-      // u = 0) — guaranteeing the C-property.  Derived in
-      //   Audusse 2004 §3.3 and Kurganov-Petrova 2007 §2.4.
-      const pressLstar = 0.5 * g * hStarL * hStarL;
-      const pressRstar = 0.5 * g * hStarR * hStarR;
-      dU_hu[cL]! += dtOverDx * pressLstar;
-      dU_hu[cR]! -= dtOverDx * pressRstar;
+      // Apply flux + Audusse correction only to WET cells.  Solid cells
+      // stay at (0, 0, 0) via the post-step boundary pin and absorb any
+      // momentum exchange with the wall.
+      if (lIsWet) {
+        dU_h[cL]! -= dtOverDx * scratchFlux.h;
+        dU_hu[cL]! -= dtOverDx * scratchFlux.hu;
+        dU_hv[cL]! -= dtOverDx * scratchFlux.hv;
+        // L-side Audusse correction
+        dU_hu[cL]! += dtOverDx * 0.5 * g * (hStarL * hStarL - hLpre * hLpre);
+      }
+      if (rIsWet) {
+        dU_h[cR]! += dtOverDx * scratchFlux.h;
+        dU_hu[cR]! += dtOverDx * scratchFlux.hu;
+        dU_hv[cR]! += dtOverDx * scratchFlux.hv;
+        // R-side Audusse correction (opposite sign — see derivation above)
+        dU_hu[cR]! += dtOverDx * 0.5 * g * (hRpre * hRpre - hStarR * hStarR);
+      }
     }
   }
 
@@ -548,17 +565,36 @@ export function kpSpatialOperator(
 
       const btD = boundary[cD]!;
       const btU = boundary[cU]!;
-      if (btD === BT_SOLID || btU === BT_SOLID) continue;
+      if (btD === BT_SOLID && btU === BT_SOLID) continue;
+      const dIsWet = btD !== BT_SOLID;
+      const uIsWet = btU !== BT_SOLID;
 
-      const wDpre = h[cD]! + bed[cD]! + 0.5 * slopes.dw_y[cD]!;
-      const wUpre = h[cU]! + bed[cU]! - 0.5 * slopes.dw_y[cU]!;
-      const huDpre = hu[cD]! + 0.5 * slopes.dhu_y[cD]!;
-      const huUpre = hu[cU]! - 0.5 * slopes.dhu_y[cU]!;
-      const hvDpre = hv[cD]! + 0.5 * slopes.dhv_y[cD]!;
-      const hvUpre = hv[cU]! - 0.5 * slopes.dhv_y[cU]!;
+      // Reflective-mirror ghost on Solid side, real state on wet side
+      let wDpre: number, huDpre: number, hvDpre: number, bD: number;
+      let wUpre: number, huUpre: number, hvUpre: number, bU: number;
+      if (dIsWet) {
+        wDpre = h[cD]! + bed[cD]! + 0.5 * slopes.dw_y[cD]!;
+        huDpre = hu[cD]! + 0.5 * slopes.dhu_y[cD]!;
+        hvDpre = hv[cD]! + 0.5 * slopes.dhv_y[cD]!;
+        bD = bed[cD]!;
+      } else {
+        wDpre = h[cU]! + bed[cU]! - 0.5 * slopes.dw_y[cU]!;
+        huDpre = hu[cU]! - 0.5 * slopes.dhu_y[cU]!;
+        hvDpre = -(hv[cU]! - 0.5 * slopes.dhv_y[cU]!);
+        bD = bed[cU]!;
+      }
+      if (uIsWet) {
+        wUpre = h[cU]! + bed[cU]! - 0.5 * slopes.dw_y[cU]!;
+        huUpre = hu[cU]! - 0.5 * slopes.dhu_y[cU]!;
+        hvUpre = hv[cU]! - 0.5 * slopes.dhv_y[cU]!;
+        bU = bed[cU]!;
+      } else {
+        wUpre = h[cD]! + bed[cD]! + 0.5 * slopes.dw_y[cD]!;
+        huUpre = hu[cD]! + 0.5 * slopes.dhu_y[cD]!;
+        hvUpre = -(hv[cD]! + 0.5 * slopes.dhv_y[cD]!);
+        bU = bed[cD]!;
+      }
 
-      const bD = bed[cD]!;
-      const bU = bed[cU]!;
       const bStar = Math.max(bD, bU);
 
       const hDpre = Math.max(0, wDpre - bD);
@@ -583,18 +619,18 @@ export function kpSpatialOperator(
       );
       if (localMax > maxSpeed) maxSpeed = localMax;
 
-      dU_h[cD]! -= dtOverDx * scratchFlux.h;
-      dU_hu[cD]! -= dtOverDx * scratchFlux.hu;
-      dU_hv[cD]! -= dtOverDx * scratchFlux.hv;
-      dU_h[cU]! += dtOverDx * scratchFlux.h;
-      dU_hu[cU]! += dtOverDx * scratchFlux.hu;
-      dU_hv[cU]! += dtOverDx * scratchFlux.hv;
-
-      // Well-balanced y-momentum bed-pressure source (same structure as x)
-      const pressDstar = 0.5 * g * hStarD * hStarD;
-      const pressUstar = 0.5 * g * hStarU * hStarU;
-      dU_hv[cD]! += dtOverDx * pressDstar;
-      dU_hv[cU]! -= dtOverDx * pressUstar;
+      if (dIsWet) {
+        dU_h[cD]! -= dtOverDx * scratchFlux.h;
+        dU_hu[cD]! -= dtOverDx * scratchFlux.hu;
+        dU_hv[cD]! -= dtOverDx * scratchFlux.hv;
+        dU_hv[cD]! += dtOverDx * 0.5 * g * (hStarD * hStarD - hDpre * hDpre);
+      }
+      if (uIsWet) {
+        dU_h[cU]! += dtOverDx * scratchFlux.h;
+        dU_hu[cU]! += dtOverDx * scratchFlux.hu;
+        dU_hv[cU]! += dtOverDx * scratchFlux.hv;
+        dU_hv[cU]! += dtOverDx * 0.5 * g * (hUpre * hUpre - hStarU * hStarU);
+      }
     }
   }
 
@@ -712,13 +748,16 @@ function applyEdgeFluxes(
     dU_hu[cInside]! += cellFluxSign * dtOverDx * scratchFlux.hu;
     dU_hv[cInside]! += cellFluxSign * dtOverDx * scratchFlux.hv;
 
-    // Well-balanced pressure source at the edge face
-    const pressIstar = 0.5 * g * hStarI * hStarI;
-    const cellSourceSign = sign; // matches the face-source convention used inside
+    // Audusse correction at the edge face.  `sign` indicates which side
+    // of the face the interior cell is on:
+    //   sign = +1 → inside is LEFT/DOWN → L-side: dU += (g/2)·(h*² - h_pre²)
+    //   sign = -1 → inside is RIGHT/UP   → R-side: dU += (g/2)·(h_pre² - h*²)
+    // Multiplying (h*² - h_pre²) by `sign` yields both cases.
+    const correction = sign * dtOverDx * 0.5 * g * (hStarI * hStarI - hPreI * hPreI);
     if (normalAxis === 0) {
-      dU_hu[cInside]! += cellSourceSign * dtOverDx * pressIstar;
+      dU_hu[cInside]! += correction;
     } else {
-      dU_hv[cInside]! += cellSourceSign * dtOverDx * pressIstar;
+      dU_hv[cInside]! += correction;
     }
   };
 
