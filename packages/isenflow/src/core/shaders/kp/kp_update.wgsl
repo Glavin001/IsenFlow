@@ -94,11 +94,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let b_self = bed[c * 2u + 1u];
-  let eps = params.dt;       // (using params.dt slot is a placeholder; we
-                             //  set the actual eps via params field; see
-                             //  below — overridden by per-step uniform)
-  // The "real" eps: hard-coded to 1e-3 m for now (KP standard).  When we
-  // add a desingEps field to SimParams in a follow-up, swap this out.
+  // Kurganov desingularization regularizer ε for u = √2·h·hu / √(h⁴ + max(h⁴, ε⁴)).
+  // Hard-coded to 1e-3 m here to match the CPU oracle; a future commit can
+  // expose this via SimParams when adaptive resolution is added.
   let desEps: f32 = 1.0e-3;
 
   let dtOverDx = params.dt / params.dx;
