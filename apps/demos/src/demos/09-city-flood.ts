@@ -382,11 +382,13 @@ function placeBuilding(ctx: Parameters<Demo['setup']>[0], b: Building) {
   const spanW = 2 * b.halfW + 1;
   const spanH = 2 * halfH + 1;
 
-  // Solid-mask aware solver?  KP's SweSolver exposes markSolidRegion; the
-  // legacy VP solver does not.  When available, mark NON-GAP wall cells as
-  // Solid (zero flux through the wall faces — eliminates the wet/dry spike
-  // pathology that VP suffered).  Gap cells stay as raised bed (sill).
-  const supportsSolid = typeof (ctx.solver as { markSolidRegion?: unknown }).markSolidRegion === 'function';
+  // Walls are encoded as RAISED BED only — height `wallH`.  KP's Audusse
+  // hydrostatic reconstruction handles wet/dry at the face naturally: water
+  // surface ≤ wallH ⇒ zero flux (lake-at-rest preserved, building dry);
+  // water surface > wallH ⇒ flow over the top into the interior.  We
+  // deliberately do NOT call markSolidRegion here — Solid would pin the
+  // cell to (0,0,0) and reflect every wave, making the building an
+  // infinitely-tall impermeable barrier no matter how high the flood rises.
 
   const writeWall = (
     x: number, y: number, w: number, h: number,
@@ -403,24 +405,6 @@ function placeBuilding(ctx: Parameters<Demo['setup']>[0], b: Building) {
       }
     }
     ctx.solver.writeBedRegion({ x, y, w, h }, buf);
-
-    // Stamp Solid on the non-gap cells so KP treats them as impermeable
-    // walls (not just tall water).  Sill cells (gap) stay as bed only.
-    if (supportsSolid) {
-      const solver = ctx.solver as { markSolidRegion: (r: { x: number; y: number; w: number; h: number }) => void };
-      if (gapStart === undefined || gapEnd === undefined) {
-        solver.markSolidRegion({ x, y, w, h });
-      } else {
-        // Mark the two non-gap segments along the wall axis
-        if (axis === 'x') {
-          if (gapStart > 0) solver.markSolidRegion({ x, y, w: gapStart, h });
-          if (gapEnd < w) solver.markSolidRegion({ x: x + gapEnd, y, w: w - gapEnd, h });
-        } else {
-          if (gapStart > 0) solver.markSolidRegion({ x, y, w, h: gapStart });
-          if (gapEnd < h) solver.markSolidRegion({ x, y: y + gapEnd, w, h: h - gapEnd });
-        }
-      }
-    }
   };
 
   const opening = b.opening;
